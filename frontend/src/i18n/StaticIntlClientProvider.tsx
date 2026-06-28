@@ -10,6 +10,7 @@ import frMessages from '../../messages/fr.json';
 import itMessages from '../../messages/it.json';
 import pseudoMessages from '../../messages/pseudo.json';
 import ptMessages from '../../messages/pt.json';
+import ruMessages from '../../messages/ru.json';
 import { getMessageFallback, onIntlError } from './clientErrorHandlers';
 import { DEFAULT_LOCALE } from './locales';
 import { stripMeta } from './stripMeta';
@@ -22,6 +23,7 @@ export const MESSAGES_BY_LOCALE: Record<string, AbstractIntlMessages> = {
     fr: stripMeta(frMessages),
     es: stripMeta(esMessages),
     pt: stripMeta(ptMessages),
+    ru: stripMeta(ruMessages),
 };
 
 export function StaticIntlClientProvider({

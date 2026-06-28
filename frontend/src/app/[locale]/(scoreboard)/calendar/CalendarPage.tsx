@@ -37,6 +37,7 @@ import {
     fr as dateFnsFr,
     it as dateFnsIt,
     ptBR as dateFnsPtBR,
+    ru as dateFnsRu,
 } from 'date-fns/locale';
 import { useLocale, useTranslations } from 'next-intl';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -50,6 +51,7 @@ const SCHEDULER_LOCALES = {
     fr: dateFnsFr,
     es: dateFnsEs,
     pt: dateFnsPtBR,
+    ru: dateFnsRu,
 } as const;
 
 type TranslateFn = (key: string, values?: Record<string, string | number>) => string;

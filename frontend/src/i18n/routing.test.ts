@@ -3,7 +3,7 @@ import { routing } from './routing';
 
 describe('routing config', () => {
     it('contains expected locales', () => {
-        expect(routing.locales).toEqual(['en', 'pseudo', 'de', 'it', 'fr', 'es', 'pt']);
+        expect(routing.locales).toEqual(['en', 'pseudo', 'de', 'it', 'fr', 'es', 'pt', 'ru']);
     });
 
     it('defaults to en', () => {
