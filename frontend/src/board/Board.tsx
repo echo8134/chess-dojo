@@ -334,6 +334,9 @@ const Board: React.FC<BoardProps> = ({ config, onInitialize, onInitializeBoard, 
 
             board.set({
                 ...config,
+                // Loading a position must not animate, or the pieces fly in from
+                // the default position or from the previous one.
+                animation: { enabled: false },
                 fen: chess.fen(),
                 turnColor: config?.turnColor || toColor(chess),
                 movable: {
@@ -365,6 +368,8 @@ const Board: React.FC<BoardProps> = ({ config, onInitialize, onInitializeBoard, 
             });
 
             onInitialize?.(board, chess, boardRef);
+            // onInitialize may load a position too, so re-enable animation after it.
+            board.set({ animation: { enabled: true, ...config?.animation } });
             setIsInitialized(true);
         } else if (boardRef.current && board && !isInitialized) {
             board.set({ ...config });
