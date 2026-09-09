@@ -290,13 +290,15 @@ const PgnBoard = forwardRef<PgnBoardApi, PgnBoardProps>(
             [parentOnInitialize, setBoard],
         );
 
+        // Board applies gameOrientation when it (re)initializes. This syncs the
+        // context and handles an orientation change without a position change.
         const gameOrientation = game?.orientation || startOrientation || 'white';
         useEffect(() => {
-            if (gameOrientation !== board?.state.orientation) {
-                setOrientation(gameOrientation);
-                toggleOrientation();
+            setOrientation(gameOrientation);
+            if (board && gameOrientation !== board.state.orientation) {
+                board.toggleOrientation();
             }
-        }, [gameOrientation, board, toggleOrientation]);
+        }, [gameOrientation, board]);
 
         useEffect(() => {
             // eslint-disable-next-line react-hooks/immutability
@@ -376,7 +378,7 @@ const PgnBoard = forwardRef<PgnBoardApi, PgnBoardProps>(
                                     showPlayerHeaders,
                                     pgn,
                                     fen,
-                                    startOrientation,
+                                    startOrientation: gameOrientation,
                                     onInitialize,
                                 }}
                             />
