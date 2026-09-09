@@ -23,6 +23,33 @@ test.describe('Memorize Games Page', () => {
         await expect(page.getByText('Show Answer')).toBeVisible();
     });
 
+    test('should not reveal moves past the frontier via keyboard in test mode', async ({
+        page,
+    }) => {
+        // window.d.ts imports chessground's Api from a package that is not installed.
+        const getFen = () =>
+            page.evaluate(() =>
+                (window as unknown as { chessground: { getFen(): string } }).chessground.getFen(),
+            );
+        const startFen = await getFen();
+
+        // Study mode first, to show the key reaches the board at all.
+        await page.keyboard.press('ArrowRight');
+        expect(await getFen()).not.toBe(startFen);
+        await page.keyboard.press('ArrowLeft');
+        expect(await getFen()).toBe(startFen);
+
+        await page.getByRole('radio', { name: 'Test' }).click();
+        await expect(page.getByText('Show Answer')).toBeVisible();
+
+        // First variation falls back to the next mainline move.
+        await page.keyboard.press('Shift+ArrowRight');
+        expect(await getFen()).toBe(startFen);
+
+        await page.keyboard.press('ArrowRight');
+        expect(await getFen()).toBe(startFen);
+    });
+
     test('should switch between games', async ({ page }) => {
         // Click different games from the PGN selector
         const items = page.getByTestId('pgn-selector-item');
