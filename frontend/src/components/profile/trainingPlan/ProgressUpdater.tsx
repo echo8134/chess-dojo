@@ -12,6 +12,7 @@ import {
     getCurrentCount,
     isRequirement,
 } from '@/database/requirement';
+import { TimelineEntry, TimelineStudyInfo } from '@/database/timeline';
 import { TimeFormat } from '@/database/user';
 import {
     Alert,
@@ -42,6 +43,12 @@ interface ProgressUpdaterProps {
     cohort: string;
     onClose: () => void;
     setView?: (view: TaskDialogView) => void;
+    /** The study item this update is for, recorded on the timeline entry. */
+    studyInfo?: TimelineStudyInfo;
+    /** Prefills the new count; previousCount in the request stays the real current count. */
+    initialCount?: number;
+    /** Called with the created timeline entry after it is added to the timeline, before onClose. */
+    onSuccess?: (entry: TimelineEntry) => void;
 }
 
 export const ProgressUpdater = ({
@@ -50,6 +57,9 @@ export const ProgressUpdater = ({
     cohort,
     onClose,
     setView,
+    studyInfo,
+    initialCount,
+    onSuccess,
 }: ProgressUpdaterProps) => {
     const t = useTranslations('profile.trainingPlan.progressUpdater');
     const tCommon = useTranslations('profile.trainingPlan.common');
@@ -60,7 +70,7 @@ export const ProgressUpdater = ({
     const totalCount = requirement.counts[cohort] || 0;
     const currentCount = getCurrentCount({ cohort, requirement, progress, timeline: entries });
 
-    const [value, setValue] = useState<number>(currentCount);
+    const [value, setValue] = useState<number>(initialCount ?? currentCount);
     const [markComplete, setMarkComplete] = useState(true);
     const [date, setDate] = useState<DateTime | null>(DateTime.now());
 
@@ -134,6 +144,7 @@ export const ProgressUpdater = ({
             incrementalMinutesSpent: addedTime,
             date,
             notes,
+            ...(studyInfo && { studyInfo }),
         })
             .then((resp) => {
                 trackEvent(EventType.UpdateProgress, {
@@ -146,6 +157,7 @@ export const ProgressUpdater = ({
                     incremental_minutes: addedTime,
                 });
                 onNewEntry(resp.data.timelineEntry);
+                onSuccess?.(resp.data.timelineEntry);
                 onClose();
                 setHours('');
                 setMinutes('');
