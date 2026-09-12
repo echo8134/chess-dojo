@@ -158,6 +158,20 @@ const NewsfeedItemBody: React.FC<Omit<NewsfeedItemProps, 'onEdit'>> = ({ entry }
                 />
             )}
 
+            {entry.studyInfo && (
+                <Stack direction='row' spacing={1}>
+                    <Typography
+                        component='span'
+                        sx={{
+                            color: 'text.secondary',
+                        }}
+                    >
+                        {t('studied')}
+                    </Typography>
+                    <Typography>{entry.studyInfo.itemName}</Typography>
+                </Stack>
+            )}
+
             {entry.notes && (
                 <Typography
                     sx={{
