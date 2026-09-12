@@ -8,7 +8,7 @@ import { useChess } from '../../PgnBoard';
 
 const StartButtons = () => {
     const t = useTranslations('analysisBoard.boardButtons');
-    const { chess } = useChess();
+    const { chess, config } = useChess();
     const [anchorEl, setAnchorEl] = useState<HTMLElement | null>(null);
     const [copied, setCopied] = useState('');
 
@@ -63,7 +63,7 @@ const StartButtons = () => {
             <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={handleClose}>
                 <MenuItem onClick={onCopyUrl}>{t('copyUrl')}</MenuItem>
                 <MenuItem onClick={onCopyFen}>{t('copyFen')}</MenuItem>
-                <MenuItem onClick={onCopyPGN}>{t('copyPgn')}</MenuItem>
+                {!config?.disableExport && <MenuItem onClick={onCopyPGN}>{t('copyPgn')}</MenuItem>}
             </Menu>
         </Stack>
     );
