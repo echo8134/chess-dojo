@@ -15,7 +15,7 @@ const BoardButtons = ({
     underboardRef?: React.RefObject<UnderboardApi | null>;
 }) => {
     const light = useLightMode();
-    const { game, isOwner: isGameOwner, unsaved } = useGame();
+    const { game, isOwner: isGameOwner, unsaved, silentUnsaved } = useGame();
     const { chess } = useChess();
 
     return (
@@ -46,7 +46,7 @@ const BoardButtons = ({
                         <VisibilityIcon underboardRef={underboardRef} />
                         <StatusIcon game={game} />
                     </Stack>
-                ) : unsaved ? (
+                ) : unsaved && !silentUnsaved ? (
                     <UnsavedGameIcon />
                 ) : (
                     <Box sx={{ width: '40px' }}></Box>

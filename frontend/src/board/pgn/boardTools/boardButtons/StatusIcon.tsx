@@ -98,6 +98,8 @@ const StatusIcon: React.FC<StatusIconProps> = ({ game }) => {
     };
 
     const debouncedOnSave = useDebounce(onSave);
+    // An edit made just before the board unmounts is saved now rather than lost with the timer.
+    useEffect(() => () => debouncedOnSave.flush(), [debouncedOnSave]);
 
     useEffect(() => {
         if (chess) {
