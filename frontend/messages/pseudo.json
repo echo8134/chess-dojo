@@ -1421,6 +1421,7 @@
         "updatedRequirement": "[T] Updated <strong>{name}</strong>",
         "dojoPoints": "[T] Dojo Points:",
         "totalTime": "[T] Total Time:",
+        "studied": "[T] Studied:",
         "customTask": "[T] Custom Task",
         "dateTime": "[T] {date} {year} at {time}",
         "memberOfCohort": "[T] Member of the {cohort} cohort",
