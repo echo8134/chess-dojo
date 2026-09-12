@@ -1421,6 +1421,7 @@
         "updatedRequirement": "Aggiornato <strong>{name}</strong>",
         "dojoPoints": "Punti Dojo:",
         "totalTime": "Tempo totale:",
+        "studied": "Studied:",
         "customTask": "Compito personalizzato",
         "dateTime": "{date} {year} alle {time}",
         "memberOfCohort": "Membro della coorte {cohort}",
