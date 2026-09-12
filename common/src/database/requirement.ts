@@ -1,3 +1,5 @@
+import * as z from 'zod';
+
 /** A user's progress on a specific requirement. */
 export interface RequirementProgress {
     /** The id of the requirement. */
@@ -26,6 +28,23 @@ export type CustomTaskCategory = Extract<
     | RequirementCategory.Endgame
     | RequirementCategory.Opening
 >;
+
+/** The study material a task points at: a course, or a directory of the member's games. */
+export const taskMaterialSchema = z.discriminatedUnion('kind', [
+    z.object({
+        kind: z.literal('COURSE'),
+        /** Kept a plain string so a task survives a course type this build does not know. */
+        courseType: z.string(),
+        courseId: z.string(),
+    }),
+    z.object({
+        kind: z.literal('DIRECTORY'),
+        owner: z.string(),
+        directoryId: z.string(),
+    }),
+]);
+
+export type TaskMaterial = z.infer<typeof taskMaterialSchema>;
 
 /** A custom non-dojo task created by a user. */
 export interface CustomTask {
@@ -77,6 +96,9 @@ export interface CustomTask {
      * perform operations on objects of type Requirement|CustomTask.
      */
     startCount?: number;
+
+    /** The study material the task points at, if any. */
+    material?: TaskMaterial[];
 }
 
 /** Defines how the requirement is displayed on the scoreboard. */
