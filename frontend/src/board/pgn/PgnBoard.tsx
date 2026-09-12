@@ -211,6 +211,11 @@ const PgnBoard = forwardRef<PgnBoardApi, PgnBoardProps>(
             navGuard.accept();
         }, [gameContext, navGuard, pendingGameNavigation]);
 
+        // A page that saves on its own may pass a setter to learn about the board's unsaved edits.
+        const reportUnsaved = gameContext.setHasUnsavedGameChanges;
+        useEffect(() => {
+            reportUnsaved?.(hasUnsavedGameChanges);
+        }, [reportUnsaved, hasUnsavedGameChanges]);
         const guardedGameContext = useMemo(
             () => ({
                 ...gameContext,
