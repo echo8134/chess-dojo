@@ -47,6 +47,8 @@ interface ChessConfig {
     disableTakebacks?: Color | 'both';
     disableNullMoves?: boolean;
     disableEngine?: boolean;
+    /** Hides Copy PGN, Download PGN and Clone in the Share tab. */
+    disableExport?: boolean;
     showElapsedMoveTimes?: boolean;
 }
 
@@ -132,6 +134,7 @@ const PgnBoard = forwardRef<PgnBoardApi, PgnBoardProps>(
             disableTakebacks,
             disableNullMoves: disableNullMovesProp,
             disableEngine,
+            disableExport,
             showElapsedMoveTimes,
             slots,
             slotProps,
@@ -244,6 +247,7 @@ const PgnBoard = forwardRef<PgnBoardApi, PgnBoardProps>(
                     allowDeleteBefore,
                     disableTakebacks,
                     disableEngine,
+                    disableExport,
                     showElapsedMoveTimes,
                 },
                 toggleOrientation,
@@ -276,6 +280,7 @@ const PgnBoard = forwardRef<PgnBoardApi, PgnBoardProps>(
                 slotProps,
                 disableTakebacks,
                 disableEngine,
+                disableExport,
                 initKey,
                 showElapsedMoveTimes,
                 solitaire,

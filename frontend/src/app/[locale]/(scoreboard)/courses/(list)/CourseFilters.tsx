@@ -20,7 +20,8 @@ import { useTranslations } from 'next-intl';
 import { useState } from 'react';
 import { getCategoryColor } from './CourseListItem';
 
-const { Workshop, ...courseTypes } = CourseType;
+// Study courses are reached from the training plan, not browsed here.
+const { Workshop, Study, ...courseTypes } = CourseType;
 
 export interface CourseFilters {
     /** A map from the category name to whether the category is included. */
