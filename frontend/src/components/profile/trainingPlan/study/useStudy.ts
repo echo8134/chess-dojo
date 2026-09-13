@@ -27,28 +27,38 @@ import { chooseCurrent, doneKeys } from './selectors';
 
 export type StudyTask = Requirement | CustomTask;
 
+/** What the reader opens: a training plan task with material, or a course on its own. */
+export type StudySource =
+    { kind: 'task'; taskId: string } | { kind: 'course'; courseType: string; courseId: string };
+
 export type StudyState =
     | { status: 'loading' }
     | { status: 'error'; error: unknown }
     | { status: 'no-material'; task: StudyTask }
-    | { status: 'blocked'; task: StudyTask; course: Course }
-    | { status: 'empty'; task: StudyTask; book: StudyBook }
+    | { status: 'blocked'; task?: StudyTask; course: Course }
+    | { status: 'empty'; task?: StudyTask; book: StudyBook }
     | StudyReady;
 
-export interface StudyReady {
-    status: 'ready';
+/** The task-bound part of a study: progress, done marks and the timer. Absent when browsing a course. */
+export interface StudySessionState {
     task: StudyTask;
     cohort: string;
     progress?: RequirementProgress;
     currentCount: number;
     totalCount: number;
+    done: Set<string>;
+    historyComplete: boolean;
+    onMarkedDone: (entry: TimelineEntry) => void;
+}
+
+export interface StudyReady {
+    status: 'ready';
+    session?: StudySessionState;
     book: StudyBook;
     current: StudyItem;
     /** Refused, returning false, while a copy write is in flight. */
     select: (item: StudyItem) => boolean;
-    done: Set<string>;
     workedOn: Set<string>;
-    historyComplete: boolean;
     /** True from the first edit of a canonical game until its copy holds every edit. */
     pendingEdits: boolean;
     /** The board reports its own unsaved edits here; selecting another item waits for them. */
@@ -56,7 +66,6 @@ export interface StudyReady {
     copyRequest: Request;
     board?: StudyBoard;
     onBoardInitialize: (board: BoardApi, chess: Chess) => void;
-    onMarkedDone: (entry: TimelineEntry) => void;
 }
 
 /** What the page hands to PgnBoard for the current item. Constant while the item stays selected. */
@@ -112,7 +121,7 @@ export function taskCohort(task: StudyTask, user: User): string {
     return [...options].sort(compareCohorts)[0] ?? user.dojoCohort;
 }
 
-export function useStudy(taskId: string, urlItemKey: string | null): StudyState {
+export function useStudy(source: StudySource, urlItemKey: string | null): StudyState {
     const api = useApi();
     const { user, status: authStatus } = useAuth();
     const { requirements, request: requirementsRequest } = useRequirements(ALL_COHORTS, false);
@@ -120,16 +129,23 @@ export function useStudy(taskId: string, urlItemKey: string | null): StudyState 
     const { updateSearchParams } = useNextSearchParams();
     const copyRequest = useRequest();
 
+    const taskId = source.kind === 'task' ? source.taskId : undefined;
     const task = useMemo<StudyTask | undefined>(
         () =>
-            user?.customTasks?.find((t) => t.id === taskId) ??
-            requirements.find((r) => r.id === taskId),
+            taskId
+                ? (user?.customTasks?.find((t) => t.id === taskId) ??
+                  requirements.find((r) => r.id === taskId))
+                : undefined,
         [user?.customTasks, requirements, taskId],
     );
     // Keyed by value, so a refreshed user record does not rebuild the book or remount the board.
-    const materialKey = JSON.stringify(task?.material?.[0] ?? null);
+    const materialKey = JSON.stringify(
+        source.kind === 'course'
+            ? { kind: 'COURSE', courseType: source.courseType, courseId: source.courseId }
+            : (task?.material?.[0] ?? null),
+    );
     const material = useMemo(() => JSON.parse(materialKey) as TaskMaterial | null, [materialKey]);
-    const hasTask = !!task;
+    const hasSource = source.kind === 'course' || !!task;
 
     const [bookState, setBookState] = useState<BookState>({ status: 'loading' });
     const [copies, setCopies] = useState<Map<string, GameKey>>();
@@ -168,7 +184,7 @@ export function useStudy(taskId: string, urlItemKey: string | null): StudyState 
 
     // The book is the task's first material entry, resolved through the existing endpoints.
     useEffect(() => {
-        if (!hasTask || !username) {
+        if (!hasSource || !username) {
             return;
         }
         if (!material) {
@@ -209,7 +225,7 @@ export function useStudy(taskId: string, urlItemKey: string | null): StudyState 
         return () => {
             cancelled = true;
         };
-    }, [hasTask, material, username]);
+    }, [hasSource, material, username]);
 
     // The student's games, paged to the end once, to find working copies.
     useEffect(() => {
@@ -239,9 +255,9 @@ export function useStudy(taskId: string, urlItemKey: string | null): StudyState 
         };
     }, [bookState, username]);
 
-    // The student's timeline, cumulatively and in the background, for done marks.
+    // The student's timeline, cumulatively and in the background, for done marks. Browsing needs none.
     useEffect(() => {
-        if (!username) {
+        if (!username || !taskId) {
             return;
         }
         let cancelled = false;
@@ -261,7 +277,7 @@ export function useStudy(taskId: string, urlItemKey: string | null): StudyState 
         return () => {
             cancelled = true;
         };
-    }, [username]);
+    }, [username, taskId]);
 
     const items = useMemo(
         () => (bookState.status === 'ready' ? itemsOf(bookState.book) : []),
@@ -482,7 +498,7 @@ export function useStudy(taskId: string, urlItemKey: string | null): StudyState 
         setEntries((prev) => [entry, ...prev]);
     }, []);
 
-    const done = useMemo(() => doneKeys(entries, taskId), [entries, taskId]);
+    const done = useMemo(() => doneKeys(entries, taskId ?? ''), [entries, taskId]);
     const workedOn = useMemo(() => new Set(copies?.keys() ?? []), [copies]);
 
     const loadedGameRef = useRef(loadedGame);
@@ -551,7 +567,7 @@ export function useStudy(taskId: string, urlItemKey: string | null): StudyState 
     if (authStatus === AuthStatus.Loading || !user) {
         return { status: 'loading' };
     }
-    if (!task) {
+    if (source.kind === 'task' && !task) {
         if (requirementsRequest.isSent() && !requirementsRequest.isLoading()) {
             return { status: 'error', error: new Error('Task not found') };
         }
@@ -559,32 +575,46 @@ export function useStudy(taskId: string, urlItemKey: string | null): StudyState 
     }
     if (bookState.status === 'loading') return { status: 'loading' };
     if (bookState.status === 'error') return { status: 'error', error: bookState.error };
-    if (bookState.status === 'no-material') return { status: 'no-material', task };
+    if (bookState.status === 'no-material') {
+        if (!task) return { status: 'error', error: new Error('Course not found') };
+        return { status: 'no-material', task };
+    }
     if (bookState.status === 'blocked')
         return { status: 'blocked', task, course: bookState.course };
     if (items.length === 0) return { status: 'empty', task, book: bookState.book };
     if (!current) return { status: 'loading' };
 
-    const cohort = taskCohort(task, user);
-    const progress = user.progress[task.id];
+    let session: StudySessionState | undefined;
+    if (task) {
+        const cohort = taskCohort(task, user);
+        const progress = user.progress[task.id];
+        session = {
+            task,
+            cohort,
+            progress,
+            currentCount: getCurrentCount({
+                cohort,
+                requirement: task,
+                progress,
+                timeline: entries,
+            }),
+            totalCount: task.counts[cohort] ?? task.counts[ALL_COHORTS] ?? 0,
+            done,
+            historyComplete,
+            onMarkedDone,
+        };
+    }
     return {
         status: 'ready',
-        task,
-        cohort,
-        progress,
-        currentCount: getCurrentCount({ cohort, requirement: task, progress, timeline: entries }),
-        totalCount: task.counts[cohort] ?? task.counts[ALL_COHORTS] ?? 0,
+        session,
         book: bookState.book,
         current,
         select,
-        done,
         workedOn,
-        historyComplete,
         pendingEdits,
         onBoardUnsaved,
         copyRequest,
         board,
         onBoardInitialize,
-        onMarkedDone,
     };
 }

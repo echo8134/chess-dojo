@@ -9,7 +9,7 @@ export default async function Page(props: { params: Promise<{ taskId: string }> 
     const { taskId } = await props.params;
     return (
         <Suspense>
-            <StudyPage taskId={taskId} />
+            <StudyPage source={{ kind: 'task', taskId }} />
         </Suspense>
     );
 }
