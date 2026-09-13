@@ -113,6 +113,9 @@ interface CustomTaskEditorProps {
     open: boolean;
     onClose: () => void;
     initialCategory: CustomTaskCategory;
+    /** Prefills a new task's material, for a course chosen elsewhere. Ignored when editing. */
+    initialMaterial?: TaskMaterial;
+    initialName?: string;
 }
 
 const CustomTaskEditor: React.FC<CustomTaskEditorProps> = ({
@@ -120,6 +123,8 @@ const CustomTaskEditor: React.FC<CustomTaskEditorProps> = ({
     open,
     onClose,
     initialCategory,
+    initialMaterial,
+    initialName,
 }) => {
     const t = useTranslations('profile.trainingPlan.customTask');
     const tCommon = useTranslations('profile.trainingPlan.common');
@@ -129,7 +134,7 @@ const CustomTaskEditor: React.FC<CustomTaskEditorProps> = ({
     const { resetRequest: resetTimeline } = useTimelineContext();
 
     const [category, setCategory] = useState(task?.category ?? initialCategory);
-    const [name, setName] = useState(task?.name ?? '');
+    const [name, setName] = useState(task?.name ?? initialName ?? '');
     const [description, setDescription] = useState(task?.description ?? '');
     const [cohorts, setCohorts] = useState([ALL_COHORTS]);
     const [startCount, setStartCount] = useState(
@@ -149,7 +154,9 @@ const CustomTaskEditor: React.FC<CustomTaskEditorProps> = ({
         isOtherCountType ? task?.progressBarSuffix || '' : '',
     );
     const [trackCountPerCohort, setTrackCountPerCohort] = useState(false);
-    const [material, setMaterial] = useState<TaskMaterial | undefined>(task?.material?.[0]);
+    const [material, setMaterial] = useState<TaskMaterial | undefined>(
+        task ? task.material?.[0] : initialMaterial,
+    );
     const [homeDirectory, setHomeDirectory] = useState<Directory>();
     const [courses, setCourses] = useState<Course[]>([]);
     const materialRequest = useRequest();
