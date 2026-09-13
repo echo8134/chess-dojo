@@ -14,7 +14,7 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { itemsOf } from './book';
-import { useStudy } from './useStudy';
+import { StudySource, useStudy } from './useStudy';
 
 const PGN_A = '[Event "A"]\n[White "Keres"]\n[Black "Smyslov"]\n[Result "*"]\n\n*';
 const PGN_B = '[Event "B"]\n[White "Tal"]\n[Black "Botvinnik"]\n[Result "*"]\n\n*';
@@ -154,12 +154,15 @@ const wrapper = ({ children }: { children: ReactNode }) => (
     <TimerContext.Provider value={timer}>{children}</TimerContext.Provider>
 );
 
-function renderStudy(urlKey: string | null = null) {
-    return renderHook(() => useStudy('task-1', urlKey), { wrapper });
+const TASK_SOURCE: StudySource = { kind: 'task', taskId: 'task-1' };
+const COURSE_SOURCE: StudySource = { kind: 'course', courseType: 'STUDY', courseId: 'study-1' };
+
+function renderStudy(urlKey: string | null = null, source: StudySource = TASK_SOURCE) {
+    return renderHook(() => useStudy(source, urlKey), { wrapper });
 }
 
-async function ready(urlKey: string | null = null) {
-    const rendered = renderStudy(urlKey);
+async function ready(urlKey: string | null = null, source: StudySource = TASK_SOURCE) {
+    const rendered = renderStudy(urlKey, source);
     await waitFor(() => expect(rendered.result.current.status).toBe('ready'));
     const study = () => {
         const s = rendered.result.current;
@@ -219,7 +222,7 @@ describe('useStudy: book, current item and done marks', () => {
         mocks.api.listUserTimeline.mockRejectedValue(new Error('offline'));
         const { study } = await ready();
         expect(study().current.key).toBe(KEY_A);
-        expect(study().historyComplete).toBe(true);
+        expect(study().session?.historyComplete).toBe(true);
     });
 
     it('starts the timer on the task when it is idle, once', async () => {
@@ -242,10 +245,13 @@ describe('useStudy: book, current item and done marks', () => {
     });
 
     it('follows the URL to another item, unless edits are pending', async () => {
-        const rendered = renderHook(({ key }: { key: string | null }) => useStudy('task-1', key), {
-            wrapper,
-            initialProps: { key: KEY_A },
-        });
+        const rendered = renderHook(
+            ({ key }: { key: string | null }) => useStudy(TASK_SOURCE, key),
+            {
+                wrapper,
+                initialProps: { key: KEY_A },
+            },
+        );
         const study = () => {
             const s = rendered.result.current;
             if (s.status !== 'ready') throw new Error(`status ${s.status}`);
@@ -270,10 +276,13 @@ describe('useStudy: book, current item and done marks', () => {
     });
 
     it('restores the initial item when Back returns to the URL without one', async () => {
-        const rendered = renderHook(({ key }: { key: string | null }) => useStudy('task-1', key), {
-            wrapper,
-            initialProps: { key: null as string | null },
-        });
+        const rendered = renderHook(
+            ({ key }: { key: string | null }) => useStudy(TASK_SOURCE, key),
+            {
+                wrapper,
+                initialProps: { key: null as string | null },
+            },
+        );
         const study = () => {
             const s = rendered.result.current;
             if (s.status !== 'ready') throw new Error(`status ${s.status}`);
@@ -300,11 +309,67 @@ describe('useStudy: book, current item and done marks', () => {
             .mockResolvedValueOnce({ entries: [entry(KEY_A)], lastEvaluatedKey: 'page-2' })
             .mockResolvedValueOnce({ entries: [entry(KEY_B, 'other')], lastEvaluatedKey: '' });
         const { study } = await ready();
-        await waitFor(() => expect(study().historyComplete).toBe(true));
-        expect([...study().done]).toEqual([KEY_A]);
+        await waitFor(() => expect(study().session?.historyComplete).toBe(true));
+        expect([...(study().session?.done ?? [])]).toEqual([KEY_A]);
 
-        act(() => study().onMarkedDone(entry(KEY_B)));
-        expect([...study().done].sort()).toEqual([KEY_A, KEY_B]);
+        act(() => study().session?.onMarkedDone(entry(KEY_B)));
+        expect([...(study().session?.done ?? [])].sort()).toEqual([KEY_A, KEY_B]);
+    });
+
+    it('carries the task, its cohort and counts in the session', async () => {
+        const { study } = await ready();
+        expect(study().session).toMatchObject({
+            task: { id: 'task-1' },
+            cohort: '1500-1600',
+            currentCount: 0,
+            totalCount: 45,
+        });
+    });
+});
+
+describe('useStudy: browsing a course without a task', () => {
+    it('opens the course with no session, no timeline load and no timer', async () => {
+        const { study } = await ready(KEY_A, COURSE_SOURCE);
+        expect(study().session).toBeUndefined();
+        expect(study().book.chapters).toHaveLength(2);
+        expect(study().current.key).toBe(KEY_A);
+        expect(mocks.api.getCourse).toHaveBeenCalledWith('STUDY', 'study-1');
+        expect(mocks.api.listUserTimeline).not.toHaveBeenCalled();
+        expect(timer.onStart).not.toHaveBeenCalled();
+    });
+
+    it('still finds the working copies', async () => {
+        const copy = copyOf('copy-a', KEY_A, PGN_A);
+        mocks.api.listGamesByOwner.mockResolvedValue({ data: { games: [copy] } });
+        mocks.api.getGame.mockResolvedValue({ data: copy });
+        const { study } = await ready(null, COURSE_SOURCE);
+        expect(study().current.key).toBe(KEY_B);
+        expect(study().workedOn.has(KEY_A)).toBe(true);
+    });
+
+    it('reports a course the member cannot open as blocked', async () => {
+        mocks.api.getCourse.mockResolvedValue({ data: { course, isBlocked: true } });
+        const rendered = renderStudy(null, COURSE_SOURCE);
+        await waitFor(() => expect(rendered.result.current.status).toBe('blocked'));
+        expect(rendered.result.current).toMatchObject({ course: { id: 'study-1' } });
+        expect((rendered.result.current as { task?: unknown }).task).toBeUndefined();
+    });
+
+    it('creates the working copy from the first edit while browsing', async () => {
+        mocks.api.createGame.mockResolvedValue({ data: copyOf('copy-a', KEY_A, PGN_A) });
+        mocks.api.updateGame.mockImplementation(
+            (_c: string, id: string, req: { pgnText: string }) =>
+                Promise.resolve({ data: copyOf(id, KEY_A, req.pgnText) }),
+        );
+        const { study } = await ready(KEY_A, COURSE_SOURCE);
+        await waitFor(() => expect(study().board).toBeDefined());
+        const chess = attachBoard(study(), PGN_A);
+        act(() => {
+            chess.move('e4');
+        });
+        await waitFor(() => expect(study().board?.context.game).toBeDefined());
+        expect(mocks.api.createGame).toHaveBeenCalledTimes(1);
+        expect(study().workedOn.has(KEY_A)).toBe(true);
     });
 });
 
