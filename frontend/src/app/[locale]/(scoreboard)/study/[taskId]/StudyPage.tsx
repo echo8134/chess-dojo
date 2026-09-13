@@ -8,10 +8,15 @@ import { DefaultUnderboardTab } from '@/board/pgn/boardTools/underboard/underboa
 import { Link } from '@/components/navigation/Link';
 import { TimelineProvider } from '@/components/profile/activity/useTimeline';
 import { ProgressUpdater } from '@/components/profile/trainingPlan/ProgressUpdater';
+import { StudyBrowseNotice } from '@/components/profile/trainingPlan/study/StudyBrowseNotice';
 import { StudyCatalog } from '@/components/profile/trainingPlan/study/StudyCatalog';
 import { StudyLayout } from '@/components/profile/trainingPlan/study/StudyLayout';
 import { StudySession } from '@/components/profile/trainingPlan/study/StudySession';
-import { StudyReady, useStudy } from '@/components/profile/trainingPlan/study/useStudy';
+import {
+    StudyReady,
+    StudySource,
+    useStudy,
+} from '@/components/profile/trainingPlan/study/useStudy';
 import { GameContext } from '@/context/useGame';
 import { useNextSearchParams } from '@/hooks/useNextSearchParams';
 import LoadingPage from '@/loading/LoadingPage';
@@ -39,22 +44,28 @@ const STUDY_TABS = [
     DefaultUnderboardTab.Settings,
 ];
 
-export function StudyPage({ taskId }: { taskId: string }) {
+const NO_DONE_MARKS = new Set<string>();
+
+export function StudyPage({ source }: { source: StudySource }) {
     const { user } = useAuth();
     if (!user) {
         return <LoadingPage />;
     }
+    // The provider loads a year of history on mount, which only the progress updater needs.
+    if (source.kind !== 'task') {
+        return <StudyContent source={source} />;
+    }
     return (
         <TimelineProvider owner={user.username}>
-            <StudyContent taskId={taskId} />
+            <StudyContent source={source} />
         </TimelineProvider>
     );
 }
 
-function StudyContent({ taskId }: { taskId: string }) {
+function StudyContent({ source }: { source: StudySource }) {
     const t = useTranslations('study');
     const { searchParams } = useNextSearchParams();
-    const study = useStudy(taskId, searchParams.get('item'));
+    const study = useStudy(source, searchParams.get('item'));
     const isFreeTier = useFreeTier();
 
     if (study.status === 'loading') {
@@ -74,7 +85,9 @@ function StudyContent({ taskId }: { taskId: string }) {
         return (
             <Container sx={{ py: 5 }}>
                 <Stack spacing={2}>
-                    <Typography variant='h5'>{study.task.name}</Typography>
+                    <Typography variant='h5'>
+                        {study.status === 'no-material' ? study.task.name : study.book.title}
+                    </Typography>
                     <Typography>
                         {study.status === 'no-material'
                             ? t('noMaterial')
@@ -109,8 +122,8 @@ function StudyReadyView({ study }: { study: StudyReady }) {
         return () => window.removeEventListener('beforeunload', onBeforeUnload);
     }, [study.pendingEdits]);
 
-    const { task, book, current, board } = study;
-    const isDone = study.done.has(current.key);
+    const { session, book, current, board } = study;
+    const isDone = session?.done.has(current.key) ?? false;
 
     return (
         <>
@@ -121,16 +134,19 @@ function StudyReadyView({ study }: { study: StudyReady }) {
                         sx={{ color: 'text.secondary' }}
                         data-testid='study-breadcrumb'
                     >
-                        {task.category} / {task.name} · {study.currentCount} / {study.totalCount}
+                        {session
+                            ? `${session.task.category} / ${session.task.name} · ${session.currentCount} / ${session.totalCount}`
+                            : t('browse.breadcrumb', { title: book.title })}
                     </Typography>
                 }
                 catalog={
                     <StudyCatalog
                         book={book}
                         current={current}
-                        done={study.done}
+                        done={session?.done ?? NO_DONE_MARKS}
                         workedOn={study.workedOn}
-                        historyComplete={study.historyComplete}
+                        historyComplete={session?.historyComplete ?? true}
+                        browsing={!session}
                         onSelect={(item) => {
                             if (!study.select(item)) setBlockedSelect(true);
                         }}
@@ -165,37 +181,43 @@ function StudyReadyView({ study }: { study: StudyReady }) {
                     )
                 }
                 session={
-                    <StudySession
-                        task={task}
-                        item={current}
-                        currentCount={study.currentCount}
-                        totalCount={study.totalCount}
-                        startCount={task.startCount ?? 0}
-                        isDone={isDone}
-                        onMarkDone={() => setMarkingDone(true)}
-                    />
+                    session ? (
+                        <StudySession
+                            task={session.task}
+                            item={current}
+                            currentCount={session.currentCount}
+                            totalCount={session.totalCount}
+                            startCount={session.task.startCount ?? 0}
+                            isDone={isDone}
+                            onMarkDone={() => setMarkingDone(true)}
+                        />
+                    ) : (
+                        <StudyBrowseNotice />
+                    )
                 }
             />
 
             <RequestSnackbar request={study.copyRequest} />
 
-            <Dialog
-                open={markingDone}
-                onClose={() => setMarkingDone(false)}
-                maxWidth='md'
-                fullWidth
-            >
-                <DialogTitle>{t('session.markDoneTitle', { name: current.name })}</DialogTitle>
-                <ProgressUpdater
-                    requirement={task}
-                    progress={study.progress}
-                    cohort={study.cohort}
-                    initialCount={Math.min(study.currentCount + 1, study.totalCount)}
-                    studyInfo={{ itemKey: current.key, itemName: current.name }}
-                    onSuccess={study.onMarkedDone}
+            {session && (
+                <Dialog
+                    open={markingDone}
                     onClose={() => setMarkingDone(false)}
-                />
-            </Dialog>
+                    maxWidth='md'
+                    fullWidth
+                >
+                    <DialogTitle>{t('session.markDoneTitle', { name: current.name })}</DialogTitle>
+                    <ProgressUpdater
+                        requirement={session.task}
+                        progress={session.progress}
+                        cohort={session.cohort}
+                        initialCount={Math.min(session.currentCount + 1, session.totalCount)}
+                        studyInfo={{ itemKey: current.key, itemName: current.name }}
+                        onSuccess={session.onMarkedDone}
+                        onClose={() => setMarkingDone(false)}
+                    />
+                </Dialog>
+            )}
 
             <Dialog open={blockedSelect} onClose={() => setBlockedSelect(false)}>
                 <DialogTitle>{t('session.savingTitle')}</DialogTitle>
