@@ -223,6 +223,32 @@ describe('CustomTaskEditor', () => {
         expect(screen.getByText('Courses')).toBeTruthy();
     });
 
+    it('starts from a course chosen elsewhere and saves it as the material', async () => {
+        renderWithIntl(
+            <CustomTaskEditor
+                open
+                onClose={vi.fn()}
+                initialCategory={RequirementCategory.Opening}
+                initialName='Najdorf Sicilian'
+                initialMaterial={{ kind: 'COURSE', courseType: 'OPENING', courseId: 'course-1' }}
+            />,
+        );
+        expect(screen.getByDisplayValue('Najdorf Sicilian')).toBeTruthy();
+        await waitFor(() =>
+            expect(screen.getByTestId('custom-task-material-select').textContent).toContain(
+                'Najdorf Sicilian (Starter (1200-1800))',
+            ),
+        );
+        fireEvent.click(screen.getByTestId('custom-task-submit-button'));
+
+        const saved = await savedTasks();
+        expect(saved[1].name).toBe('Najdorf Sicilian');
+        expect(saved[1].category).toBe(RequirementCategory.Opening);
+        expect(saved[1].material).toEqual([
+            { kind: 'COURSE', courseType: 'OPENING', courseId: 'course-1' },
+        ]);
+    });
+
     it('saves the chosen folder as the task material', async () => {
         renderWithIntl(
             <CustomTaskEditor open onClose={vi.fn()} initialCategory={RequirementCategory.Games} />,
