@@ -239,7 +239,13 @@
                 "startCountPositive": "Debe ser un entero positivo o estar vacío",
                 "countPositive": "Debe ser un entero positivo o estar vacío",
                 "startCountLessThanGoal": "Debe ser menor que el objetivo",
-                "otherTypeRequired": "Este campo es obligatorio"
+                "otherTypeRequired": "Este campo es obligatorio",
+                "material": "Study material",
+                "materialHelper": "Optional. The task's Study button opens the games in this folder or course.",
+                "materialNone": "None",
+                "materialCurrent": "Current selection",
+                "materialFolders": "Your folders",
+                "materialCourses": "Courses"
             },
             "deleteCustomTask": {
                 "title": "¿Eliminar {name}?",
