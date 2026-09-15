@@ -4,7 +4,7 @@ import {
     DirectoryItemTypes,
 } from '@jackstenglein/chess-dojo-common/src/database/directory';
 import { describe, expect, it } from 'vitest';
-import { courseBook, directoryBook, itemsOf } from './book';
+import { concatBooks, courseBook, directoryBook, itemsOf, sliceBook } from './book';
 
 function module(overrides: Partial<CourseModule>): CourseModule {
     return {
@@ -156,5 +156,58 @@ describe('directoryBook', () => {
         const empty = directoryBook(directory, 'stranger');
         expect(empty.chapters).toEqual([]);
         expect(empty.skipped).toBe(3);
+    });
+});
+
+describe('concatBooks', () => {
+    it('reads several books as one, in order, keeping every key', () => {
+        const first = {
+            title: 'Part 1',
+            skipped: 0,
+            chapters: [{ name: 'A', items: [item('course:STUDY/p1/m/0')] }],
+        };
+        const second = {
+            title: 'Part 2',
+            skipped: 2,
+            chapters: [
+                { name: 'B', items: [item('course:STUDY/p2/m/0'), item('course:STUDY/p2/m/1')] },
+            ],
+        };
+        const book = concatBooks('Polgar M2', [first, second]);
+        expect(book.title).toBe('Polgar M2');
+        expect(book.chapters.map((c) => c.name)).toEqual(['A', 'B']);
+        expect(itemsOf(book).map((i) => i.key)).toEqual([
+            'course:STUDY/p1/m/0',
+            'course:STUDY/p2/m/0',
+            'course:STUDY/p2/m/1',
+        ]);
+        expect(book.skipped).toBe(2);
+    });
+});
+
+function item(key: string) {
+    return {
+        kind: 'canonical' as const,
+        key,
+        name: key,
+        pgn: '',
+        orientation: 'white' as const,
+        allowExport: false,
+    };
+}
+
+describe('sliceBook', () => {
+    it('keeps only the given items and drops emptied chapters', () => {
+        const book = {
+            title: 'T',
+            skipped: 0,
+            chapters: [
+                { name: 'A', items: [item('a1'), item('a2')] },
+                { name: 'B', items: [item('b1')] },
+            ],
+        };
+        const sliced = sliceBook(book, [item('a1')]);
+        expect(sliced.chapters).toEqual([{ name: 'A', items: [item('a1')] }]);
+        expect(book.chapters[0].items).toHaveLength(2);
     });
 });

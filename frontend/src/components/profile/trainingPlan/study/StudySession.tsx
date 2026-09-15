@@ -14,6 +14,8 @@ export interface StudySessionProps {
     currentCount: number;
     totalCount: number;
     startCount: number;
+    /** The count's unit of a workbook. Empty for a set. */
+    unit?: string;
     isDone: boolean;
     onMarkDone: () => void;
 }
@@ -25,6 +27,7 @@ export function StudySession({
     currentCount,
     totalCount,
     startCount,
+    unit,
     isDone,
     onMarkDone,
 }: StudySessionProps) {
@@ -41,6 +44,11 @@ export function StudySession({
                 max={totalCount}
                 suffix={task.progressBarSuffix}
             />
+            {unit && currentCount >= totalCount && (
+                <Typography variant='body2' color='success.main' data-testid='study-target-reached'>
+                    {t('targetReached', { total: totalCount - startCount, unit })}
+                </Typography>
+            )}
             <Stack
                 direction='row'
                 sx={{
