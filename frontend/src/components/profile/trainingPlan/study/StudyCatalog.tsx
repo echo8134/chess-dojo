@@ -22,6 +22,8 @@ export interface StudyCatalogProps {
     historyComplete: boolean;
     /** With no task behind the book, the header names the size instead of a count of done games. */
     browsing?: boolean;
+    /** The count's unit of a workbook, used in the header. Empty for a set. */
+    unit?: string;
     onSelect: (item: StudyItem) => void;
 }
 
@@ -33,6 +35,7 @@ export function StudyCatalog({
     workedOn,
     historyComplete,
     browsing = false,
+    unit,
     onSelect,
 }: StudyCatalogProps) {
     const t = useTranslations('study.catalog');
@@ -114,7 +117,11 @@ export function StudyCatalog({
             <Stack sx={{ px: 2, pb: 1 }}>
                 <Typography variant='h6'>{book.title}</Typography>
                 <Typography variant='body2' sx={{ color: 'text.secondary' }}>
-                    {browsing ? t('browsing', { total }) : t('studied', { done: doneCount, total })}
+                    {browsing
+                        ? t('browsing', { total })
+                        : unit
+                          ? t('studiedUnit', { done: doneCount, total, unit })
+                          : t('studied', { done: doneCount, total })}
                 </Typography>
                 {!historyComplete && (
                     <Typography variant='caption' sx={{ color: 'text.secondary' }}>

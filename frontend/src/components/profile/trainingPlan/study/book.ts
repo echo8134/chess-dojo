@@ -111,3 +111,27 @@ export function directoryBook(directory: Directory, username: string): StudyBook
 export function itemsOf(book: StudyBook): StudyItem[] {
     return book.chapters.flatMap((chapter) => chapter.items);
 }
+
+/**
+ * Several courses read as one book, in material order. Item keys name their course, so nothing is
+ * re-keyed.
+ */
+export function concatBooks(title: string, books: StudyBook[]): StudyBook {
+    return {
+        title,
+        chapters: books.flatMap((book) => book.chapters),
+        skipped: books.reduce((n, book) => n + book.skipped, 0),
+    };
+}
+
+/** The book with only the given items, in order. A chapter left with nothing is dropped. */
+export function sliceBook(book: StudyBook, items: StudyItem[]): StudyBook {
+    const keep = new Set(items.map((item) => item.key));
+    const chapters = book.chapters
+        .map((chapter) => ({
+            ...chapter,
+            items: chapter.items.filter((item) => keep.has(item.key)),
+        }))
+        .filter((chapter) => chapter.items.length > 0);
+    return { ...book, chapters };
+}

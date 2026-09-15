@@ -12,7 +12,9 @@ import { StudyBrowseNotice } from '@/components/profile/trainingPlan/study/Study
 import { StudyCatalog } from '@/components/profile/trainingPlan/study/StudyCatalog';
 import { StudyLayout } from '@/components/profile/trainingPlan/study/StudyLayout';
 import { StudySession } from '@/components/profile/trainingPlan/study/StudySession';
+import { taskTitle } from '@/components/profile/trainingPlan/study/selectors';
 import {
+    MarkDoneStart,
     StudyReady,
     StudySource,
     useStudy,
@@ -32,7 +34,7 @@ import {
 } from '@mui/material';
 import { useTranslations } from 'next-intl';
 import { useNavigationGuard } from 'next-navigation-guard';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 const STUDY_TABS = [
     DefaultUnderboardTab.Tags,
@@ -62,9 +64,17 @@ export function StudyPage({ source }: { source: StudySource }) {
     );
 }
 
-function StudyContent({ source }: { source: StudySource }) {
+function StudyContent({ source: routeSource }: { source: StudySource }) {
     const t = useTranslations('study');
     const { searchParams } = useNextSearchParams();
+    // The overview's cohort switch adds a cohort to the task route. That cohort's share, browsing
+    // only; the member's own cohort is the ordinary session.
+    const { user } = useAuth();
+    const cohort = searchParams.get('cohort');
+    const source: StudySource =
+        routeSource.kind === 'task' && cohort && cohort !== user?.dojoCohort
+            ? { ...routeSource, cohort }
+            : routeSource;
     const study = useStudy(source, searchParams.get('item'));
     const isFreeTier = useFreeTier();
 
@@ -86,7 +96,9 @@ function StudyContent({ source }: { source: StudySource }) {
             <Container sx={{ py: 5 }}>
                 <Stack spacing={2}>
                     <Typography variant='h5'>
-                        {study.status === 'no-material' ? study.task.name : study.book.title}
+                        {study.status === 'no-material'
+                            ? taskTitle(study.task, user?.dojoCohort ?? '')
+                            : study.book.title}
                     </Typography>
                     <Typography>
                         {study.status === 'no-material'
@@ -110,7 +122,8 @@ function StudyContent({ source }: { source: StudySource }) {
 function StudyReadyView({ study }: { study: StudyReady }) {
     const t = useTranslations('study');
     const tGuard = useTranslations('games.unsavedNavigationGuard');
-    const [markingDone, setMarkingDone] = useState(false);
+    const [marking, setMarking] = useState<MarkDoneStart>();
+    const markingRef = useRef(false);
     const [blockedSelect, setBlockedSelect] = useState(false);
 
     // The board's own guard only covers a saved game; until the copy exists, this page holds the edits.
@@ -135,7 +148,7 @@ function StudyReadyView({ study }: { study: StudyReady }) {
                         data-testid='study-breadcrumb'
                     >
                         {session
-                            ? `${session.task.category} / ${session.task.name} · ${session.currentCount} / ${session.totalCount}`
+                            ? `${session.task.category} / ${book.title} · ${session.currentCount} / ${session.totalCount}`
                             : t('browse.breadcrumb', { title: book.title })}
                     </Typography>
                 }
@@ -147,6 +160,7 @@ function StudyReadyView({ study }: { study: StudyReady }) {
                         workedOn={study.workedOn}
                         historyComplete={session?.historyComplete ?? true}
                         browsing={!session}
+                        unit={session?.mapping.unit}
                         onSelect={(item) => {
                             if (!study.select(item)) setBlockedSelect(true);
                         }}
@@ -188,8 +202,18 @@ function StudyReadyView({ study }: { study: StudyReady }) {
                             currentCount={session.currentCount}
                             totalCount={session.totalCount}
                             startCount={session.task.startCount ?? 0}
+                            unit={session.mapping.unit}
                             isDone={isDone}
-                            onMarkDone={() => setMarkingDone(true)}
+                            onMarkDone={() => {
+                                if (markingRef.current) return;
+                                markingRef.current = true;
+                                session
+                                    .markDone()
+                                    .then(setMarking, () => undefined)
+                                    .finally(() => {
+                                        markingRef.current = false;
+                                    });
+                            }}
                         />
                     ) : (
                         <StudyBrowseNotice />
@@ -199,22 +223,17 @@ function StudyReadyView({ study }: { study: StudyReady }) {
 
             <RequestSnackbar request={study.copyRequest} />
 
-            {session && (
-                <Dialog
-                    open={markingDone}
-                    onClose={() => setMarkingDone(false)}
-                    maxWidth='md'
-                    fullWidth
-                >
+            {session && marking && (
+                <Dialog open onClose={() => setMarking(undefined)} maxWidth='md' fullWidth>
                     <DialogTitle>{t('session.markDoneTitle', { name: current.name })}</DialogTitle>
                     <ProgressUpdater
                         requirement={session.task}
-                        progress={session.progress}
+                        progress={marking.progress}
                         cohort={session.cohort}
-                        initialCount={Math.min(session.currentCount + 1, session.totalCount)}
+                        initialCount={marking.initialCount}
                         studyInfo={{ itemKey: current.key, itemName: current.name }}
                         onSuccess={session.onMarkedDone}
-                        onClose={() => setMarkingDone(false)}
+                        onClose={() => setMarking(undefined)}
                     />
                 </Dialog>
             )}

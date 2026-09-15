@@ -13,6 +13,7 @@ import { Chess } from '@jackstenglein/chess';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { clearCourseCache } from './courseCache';
 import { StudySource, useStudy } from './useStudy';
 
 const PGN_A = '[Event "A"]\n[White "Keres"]\n[Black "Smyslov"]\n[Result "*"]\n\n*';
@@ -73,6 +74,38 @@ const task = {
     material: [{ kind: 'COURSE', courseType: 'STUDY', courseId: 'study-1' }],
 } as Requirement;
 
+/** Shaped like Polgar M2 on dev, scaled down: one count for every cohort, a start of 6, two course parts. */
+const polgar = {
+    ...task,
+    id: 'polgar',
+    name: 'Solve Polgar M2s through Problem {{count}}',
+    counts: { '1000-1100': 8, '1500-1600': 12, '2400+': 20 },
+    startCount: 6,
+    progressBarSuffix: 'Exercises',
+    material: [
+        { kind: 'COURSE', courseType: 'STUDY', courseId: 'p1' },
+        { kind: 'COURSE', courseType: 'STUDY', courseId: 'p2' },
+    ],
+} as Requirement;
+
+function problems(courseId: string, from: number, to: number): Course {
+    const modules = Array.from({ length: to - from + 1 }, (_, i) => ({
+        ...pgnModule(`${courseId}-m${i}`, `[Event "Problem ${from + i}"]\n\n*`),
+        name: `Problem ${from + i}`,
+    }));
+    return {
+        type: CourseType.Study,
+        id: courseId,
+        name: `Polgar ${from}-${to}`,
+        allowExport: false,
+        chapters: [{ name: `Problems ${from}-${to}`, modules }],
+    } as unknown as Course;
+}
+/** Parts of 8 and 6 problems, 14 items for a book that runs from 7 to 20. */
+const part1 = problems('p1', 7, 14);
+const part2 = problems('p2', 15, 20);
+const POLGAR_SOURCE: StudySource = { kind: 'task', taskId: 'polgar' };
+
 function copyOf(id: string, key: string, pgn: string): Game {
     return {
         cohort: '1500-1600',
@@ -104,6 +137,7 @@ function deferred<T>() {
 
 const mocks = vi.hoisted(() => ({
     api: {
+        getUser: vi.fn(),
         getCourse: vi.fn(),
         getDirectory: vi.fn(),
         listGamesByOwner: vi.fn(),
@@ -113,6 +147,8 @@ const mocks = vi.hoisted(() => ({
         updateGame: vi.fn(),
     },
     updateSearchParams: vi.fn(),
+    updateUser: vi.fn(),
+    user: { username: 'student', dojoCohort: '1500-1600', progress: {}, customTasks: [] },
     // When set, every render gets a new api object, as the real provider does after a user update.
     freshApi: false,
 }));
@@ -122,12 +158,13 @@ vi.mock('@/auth/Auth', () => ({
     AuthStatus: { Loading: 'Loading', Authenticated: 'Authenticated' },
     useAuth: () => ({
         status: 'Authenticated',
-        user: { username: 'student', dojoCohort: '1500-1600', progress: {}, customTasks: [] },
+        user: mocks.user,
+        updateUser: mocks.updateUser,
     }),
 }));
 vi.mock('@/api/cache/requirements', () => ({
     useRequirements: () => ({
-        requirements: [task],
+        requirements: [task, polgar],
         request: { isSent: () => true, isLoading: () => false },
     }),
 }));
@@ -178,9 +215,20 @@ function attachBoard(study: ReturnType<typeof useStudy>, pgn: string): Chess {
 }
 
 beforeEach(() => {
+    clearCourseCache();
     for (const fn of Object.values(mocks.api)) fn.mockReset();
     mocks.updateSearchParams.mockReset();
-    mocks.api.getCourse.mockResolvedValue({ data: { course, isBlocked: false } });
+    mocks.updateUser.mockReset();
+    mocks.user = { username: 'student', dojoCohort: '1500-1600', progress: {}, customTasks: [] };
+    mocks.api.getUser.mockResolvedValue({ data: mocks.user });
+    mocks.api.getCourse.mockImplementation((_type: string, id: string) =>
+        Promise.resolve({
+            data: {
+                course: id === 'p1' ? part1 : id === 'p2' ? part2 : course,
+                isBlocked: false,
+            },
+        }),
+    );
     mocks.api.listGamesByOwner.mockResolvedValue({ data: { games: [] } });
     mocks.api.listUserTimeline.mockResolvedValue({ entries: [], lastEvaluatedKey: '' });
     (timer.onStart as ReturnType<typeof vi.fn>).mockReset();
@@ -604,6 +652,109 @@ describe('useStudy: the first-change copy', () => {
         expect(accepted).toBe(false);
         expect(study().current.key).toBe(KEY_A);
         expect(mocks.updateSearchParams).not.toHaveBeenCalled();
+    });
+});
+
+describe('useStudy: a workbook read as one book, sliced to the cohort', () => {
+    function names(study: () => ReturnType<typeof useStudy> & { status: 'ready' }) {
+        return study().book.chapters.flatMap((c) => c.items.map((i) => i.name));
+    }
+
+    it('loads every material entry and shows the cohort share of the book', async () => {
+        const { study } = await ready(null, POLGAR_SOURCE);
+        expect(mocks.api.getCourse).toHaveBeenCalledTimes(2);
+        expect(study().book.title).toBe('Solve Polgar M2s through Problem 12');
+        // 1500-1600 runs to 12, so positions 7 to 12. Six items, all from the first part.
+        expect(names(study)).toEqual([
+            'Problem 7',
+            'Problem 8',
+            'Problem 9',
+            'Problem 10',
+            'Problem 11',
+            'Problem 12',
+        ]);
+        expect(study().session?.mapping).toEqual({
+            mapped: true,
+            startCount: 6,
+            unit: 'exercises',
+        });
+        expect(study().session?.totalCount).toBe(12);
+    });
+
+    it('is blocked when any part is blocked', async () => {
+        mocks.api.getCourse.mockImplementation((_type: string, id: string) =>
+            Promise.resolve({
+                data: { course: id === 'p2' ? part2 : part1, isBlocked: id === 'p2' },
+            }),
+        );
+        const rendered = renderStudy(null, POLGAR_SOURCE);
+        await waitFor(() => expect(rendered.result.current.status).toBe('blocked'));
+    });
+
+    it('ticks everything the pointer has passed and opens on the item after it', async () => {
+        mocks.user = {
+            ...mocks.user,
+            progress: {
+                polgar: {
+                    requirementId: 'polgar',
+                    counts: { ALL_COHORTS: 9 },
+                    minutesSpent: {},
+                    updatedAt: '',
+                },
+            },
+        };
+        const { study } = await ready(null, POLGAR_SOURCE);
+        expect(study().session?.currentCount).toBe(9);
+        const keys = study().book.chapters.flatMap((c) => c.items.map((i) => i.key));
+        expect([...(study().session?.done ?? [])].sort()).toEqual(keys.slice(0, 3).sort());
+        expect(study().current.name).toBe('Problem 10');
+    });
+
+    it('reads the count from the server before the mark-done dialog opens', async () => {
+        const fresh = {
+            ...mocks.user,
+            progress: {
+                polgar: {
+                    requirementId: 'polgar',
+                    counts: { ALL_COHORTS: 10 },
+                    minutesSpent: {},
+                    updatedAt: '',
+                },
+            },
+        };
+        mocks.api.getUser.mockResolvedValue({ data: fresh });
+        const { study } = await ready(null, POLGAR_SOURCE);
+        expect(study().session?.currentCount).toBe(6);
+        const start = await study().session?.markDone();
+        expect(mocks.api.getUser).toHaveBeenCalledTimes(1);
+        expect(mocks.updateUser).toHaveBeenCalledWith(fresh);
+        expect(start).toEqual({ progress: fresh.progress.polgar, initialCount: 11 });
+    });
+
+    it('falls back to the loaded count when the server read fails', async () => {
+        mocks.api.getUser.mockRejectedValue(new Error('offline'));
+        const { study } = await ready(null, POLGAR_SOURCE);
+        const start = await study().session?.markDone();
+        expect(start?.initialCount).toBe(7);
+        expect(mocks.updateUser).not.toHaveBeenCalled();
+    });
+
+    it('browses another cohort share of the task with no session', async () => {
+        const { study } = await ready(null, {
+            kind: 'task',
+            taskId: 'polgar',
+            cohort: '1000-1100',
+        });
+        expect(study().session).toBeUndefined();
+        expect(names(study)).toEqual(['Problem 7', 'Problem 8']);
+        expect(mocks.api.listUserTimeline).not.toHaveBeenCalled();
+        expect(timer.onStart).not.toHaveBeenCalled();
+    });
+
+    it('leaves a set task exactly as before', async () => {
+        const { study } = await ready();
+        expect(study().session?.mapping).toEqual({ mapped: false, startCount: 0, unit: '' });
+        expect(study().book.chapters).toHaveLength(2);
     });
 });
 

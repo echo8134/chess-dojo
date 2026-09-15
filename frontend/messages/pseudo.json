@@ -4218,7 +4218,8 @@
             "skipped": "[T] {count, plural, =1 {# game in this folder is not yours and is not listed.} other {# games in this folder are not yours and are not listed.}}",
             "empty": "[T] {count, plural, =1 {The one game in this folder is not yours, so there is nothing to study here.} other {None of the # games in this folder are yours, so there is nothing to study here.}}",
             "expandAll": "[T] Expand all",
-            "collapseAll": "[T] Collapse all"
+            "collapseAll": "[T] Collapse all",
+            "studiedUnit": "{done} of {total} {unit}"
         },
         "session": {
             "startTimer": "[T] Start timer",
@@ -4230,7 +4231,8 @@
             "markDoneTitle": "[T] Mark {name} done?",
             "savingTitle": "[T] Saving your copy",
             "savingBody": "[T] Your edits are still being saved. Try again in a moment.",
-            "unsavedBody": "[T] Your edits could not be saved yet. Make another edit to retry, or reload the page to discard them."
+            "unsavedBody": "[T] Your edits could not be saved yet. Make another edit to retry, or reload the page to discard them.",
+            "targetReached": "Target reached: {total} {unit}"
         }
     }
 }

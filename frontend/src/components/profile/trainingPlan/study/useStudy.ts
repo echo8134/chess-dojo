@@ -16,20 +16,49 @@ import {
     TaskMaterial,
 } from '@/database/requirement';
 import { TimelineEntry } from '@/database/timeline';
-import { ALL_COHORTS, compareCohorts, dojoCohorts, User } from '@/database/user';
+import { ALL_COHORTS, User } from '@/database/user';
 import { useNextSearchParams } from '@/hooks/useNextSearchParams';
 import { Chess, Event, EventType } from '@jackstenglein/chess';
 import { GameImportTypes } from '@jackstenglein/chess-dojo-common/src/database/game';
 import { MutableRefObject, use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { CanonicalItem, courseBook, directoryBook, itemsOf, StudyBook, StudyItem } from './book';
+import {
+    CanonicalItem,
+    concatBooks,
+    courseBook,
+    directoryBook,
+    itemsOf,
+    sliceBook,
+    StudyBook,
+    StudyItem,
+} from './book';
 import { copyHeaders, findCopies, studyStamp } from './copies';
-import { chooseCurrent, doneKeys } from './selectors';
+import { loadCourse } from './courseCache';
+import {
+    bookMapping,
+    BookMapping,
+    chooseCurrent,
+    cohortSlice,
+    doneKeys,
+    pointerDone,
+    taskCohort,
+    taskTitle,
+} from './selectors';
 
 export type StudyTask = Requirement | CustomTask;
 
-/** What the reader opens: a training plan task with material, or a course on its own. */
+/**
+ * What the reader opens: a training plan task with material, or a course on its own. A task
+ * with a cohort browses that cohort's share of the book, with no session.
+ */
 export type StudySource =
-    { kind: 'task'; taskId: string } | { kind: 'course'; courseType: string; courseId: string };
+    | { kind: 'task'; taskId: string; cohort?: string }
+    | { kind: 'course'; courseType: string; courseId: string };
+
+/** What the mark-done dialog opens with, once the count has come fresh from the server. */
+export interface MarkDoneStart {
+    progress?: RequirementProgress;
+    initialCount: number;
+}
 
 export type StudyState =
     | { status: 'loading' }
@@ -46,8 +75,12 @@ export interface StudySessionState {
     progress?: RequirementProgress;
     currentCount: number;
     totalCount: number;
+    /** How the book's items relate to the count. The unit is for wording. */
+    mapping: BookMapping;
     done: Set<string>;
     historyComplete: boolean;
+    /** Reads the count from the server before the dialog opens, so a stale tab cannot overwrite. */
+    markDone: () => Promise<MarkDoneStart>;
     onMarkedDone: (entry: TimelineEntry) => void;
 }
 
@@ -105,6 +138,12 @@ function sameGame(a: Game, b: Game): boolean {
     return a.cohort === b.cohort && a.id === b.id;
 }
 
+/** One material entry, loaded. */
+type BookPart =
+    | { kind: 'blocked'; course: Course }
+    | { kind: 'course'; book: StudyBook }
+    | { kind: 'folder'; book: StudyBook };
+
 type BookState =
     | { status: 'loading' }
     | { status: 'error'; error: unknown }
@@ -112,24 +151,17 @@ type BookState =
     | { status: 'blocked'; course: Course }
     | { status: 'ready'; book: StudyBook; needsCopies: boolean };
 
-/** The cohort whose count the task tracks for this user, as the task dialog picks it. */
-export function taskCohort(task: StudyTask, user: User): string {
-    const options = task.counts[ALL_COHORTS] ? dojoCohorts : Object.keys(task.counts);
-    if (options.includes(user.dojoCohort)) {
-        return user.dojoCohort;
-    }
-    return [...options].sort(compareCohorts)[0] ?? user.dojoCohort;
-}
-
 export function useStudy(source: StudySource, urlItemKey: string | null): StudyState {
     const api = useApi();
-    const { user, status: authStatus } = useAuth();
+    const { user, status: authStatus, updateUser } = useAuth();
     const { requirements, request: requirementsRequest } = useRequirements(ALL_COHORTS, false);
     const timer = use(TimerContext);
     const { updateSearchParams } = useNextSearchParams();
     const copyRequest = useRequest();
 
     const taskId = source.kind === 'task' ? source.taskId : undefined;
+    // A task opened for another cohort is browsing. No timeline, no timer, no progress.
+    const sessionTaskId = source.kind === 'task' && !source.cohort ? source.taskId : undefined;
     const task = useMemo<StudyTask | undefined>(
         () =>
             taskId
@@ -141,10 +173,13 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
     // Keyed by value, so a refreshed user record does not rebuild the book or remount the board.
     const materialKey = JSON.stringify(
         source.kind === 'course'
-            ? { kind: 'COURSE', courseType: source.courseType, courseId: source.courseId }
-            : (task?.material?.[0] ?? null),
+            ? [{ kind: 'COURSE', courseType: source.courseType, courseId: source.courseId }]
+            : (task?.material ?? []),
     );
-    const material = useMemo(() => JSON.parse(materialKey) as TaskMaterial | null, [materialKey]);
+    const materials = useMemo(() => JSON.parse(materialKey) as TaskMaterial[], [materialKey]);
+    const cohort =
+        task && user ? (source.kind === 'task' && source.cohort) || taskCohort(task, user) : '';
+    const bookTitle = task ? taskTitle(task, cohort) : undefined;
     const hasSource = source.kind === 'course' || !!task;
 
     const [bookState, setBookState] = useState<BookState>({ status: 'loading' });
@@ -182,42 +217,52 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
 
     const username = user?.username;
 
-    // The book is the task's first material entry, resolved through the existing endpoints.
+    // The book is every material entry in order, read as one, through the existing endpoints.
     useEffect(() => {
         if (!hasSource || !username) {
             return;
         }
-        if (!material) {
+        if (materials.length === 0) {
             setBookState({ status: 'no-material' });
             return;
         }
         let cancelled = false;
         setBookState({ status: 'loading' });
         const load = async () => {
-            if (material.kind === 'COURSE') {
-                const resp = await apiRef.current.getCourse(material.courseType, material.courseId);
-                if (cancelled) return;
-                if (resp.data.isBlocked || !resp.data.course) {
-                    setBookState({ status: 'blocked', course: resp.data.course });
+            const parts = await Promise.all(
+                materials.map(async (material): Promise<BookPart> => {
+                    if (material.kind === 'COURSE') {
+                        const data = await loadCourse(
+                            apiRef.current,
+                            material.courseType,
+                            material.courseId,
+                        );
+                        if (data.isBlocked || !data.course) {
+                            return { kind: 'blocked', course: data.course };
+                        }
+                        return { kind: 'course', book: courseBook(data.course) };
+                    }
+                    const resp = await apiRef.current.getDirectory(
+                        material.owner,
+                        material.directoryId,
+                    );
+                    return { kind: 'folder', book: directoryBook(resp.data.directory, username) };
+                }),
+            );
+            if (cancelled) return;
+            const books: StudyBook[] = [];
+            for (const part of parts) {
+                if (part.kind === 'blocked') {
+                    setBookState({ status: 'blocked', course: part.course });
                     return;
                 }
-                setBookState({
-                    status: 'ready',
-                    book: courseBook(resp.data.course),
-                    needsCopies: true,
-                });
-            } else {
-                const resp = await apiRef.current.getDirectory(
-                    material.owner,
-                    material.directoryId,
-                );
-                if (cancelled) return;
-                setBookState({
-                    status: 'ready',
-                    book: directoryBook(resp.data.directory, username),
-                    needsCopies: false,
-                });
+                books.push(part.book);
             }
+            setBookState({
+                status: 'ready',
+                book: concatBooks(bookTitle ?? books[0].title, books),
+                needsCopies: parts.some((part) => part.kind === 'course'),
+            });
         };
         load().catch((error: unknown) => {
             if (!cancelled) setBookState({ status: 'error', error });
@@ -225,7 +270,7 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
         return () => {
             cancelled = true;
         };
-    }, [hasSource, material, username]);
+    }, [hasSource, materials, bookTitle, username]);
 
     // The student's games, paged to the end once, to find working copies.
     useEffect(() => {
@@ -257,7 +302,7 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
 
     // The student's timeline, cumulatively and in the background, for done marks. Browsing needs none.
     useEffect(() => {
-        if (!username || !taskId) {
+        if (!username || !sessionTaskId) {
             return;
         }
         let cancelled = false;
@@ -277,11 +322,36 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
         return () => {
             cancelled = true;
         };
-    }, [username, taskId]);
+    }, [username, sessionTaskId]);
 
-    const items = useMemo(
+    const allItems = useMemo(
         () => (bookState.status === 'ready' ? itemsOf(bookState.book) : []),
         [bookState],
+    );
+    const mapping = useMemo(
+        () =>
+            task ? bookMapping(task, allItems.length) : { mapped: false, startCount: 0, unit: '' },
+        [task, allItems.length],
+    );
+    // In task mode the reader shows the cohort's share of the book and nothing past its target.
+    const items = useMemo(
+        () => (task ? cohortSlice(allItems, task, cohort, mapping) : allItems),
+        [allItems, task, cohort, mapping],
+    );
+    const book = useMemo(
+        () => (bookState.status === 'ready' ? sliceBook(bookState.book, items) : undefined),
+        [bookState, items],
+    );
+    const progress = task && user ? user.progress[task.id] : undefined;
+    const currentCount = useMemo(
+        () =>
+            task ? getCurrentCount({ cohort, requirement: task, progress, timeline: entries }) : 0,
+        [task, cohort, progress, entries],
+    );
+    // What the pointer has passed needs no fetch, so the first item can respect it at once.
+    const passed = useMemo(
+        () => pointerDone(items, currentCount, mapping),
+        [items, currentCount, mapping],
     );
 
     // The initial item, once the book and the copies are known.
@@ -289,8 +359,8 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
         if (current || items.length === 0 || !copies) {
             return;
         }
-        setCurrent(chooseCurrent(items, urlItemKey, copies));
-    }, [current, items, copies, urlItemKey]);
+        setCurrent(chooseCurrent(items, urlItemKey, copies, passed));
+    }, [current, items, copies, urlItemKey, passed]);
 
     // The saved game behind an own item or a canonical item with a copy.
     const savedKey = useMemo(() => {
@@ -324,14 +394,14 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
     // Start the timer on this task when it is idle. A timer on another task is left alone.
     const timerStarted = useRef(false);
     useEffect(() => {
-        if (timerStarted.current || bookState.status !== 'ready' || !task) {
+        if (timerStarted.current || bookState.status !== 'ready' || !task || !sessionTaskId) {
             return;
         }
         timerStarted.current = true;
         if (!timer.isRunning && (!timer.task || timer.task.id === task.id)) {
             timer.onStart(task.id);
         }
-    }, [bookState.status, task, timer]);
+    }, [bookState.status, task, sessionTaskId, timer]);
 
     // The first-change copy. One machine per selected canonical item.
     const machine = useRef<CopyMachine>({ phase: 'canonical', dirty: false });
@@ -498,7 +568,33 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
         setEntries((prev) => [entry, ...prev]);
     }, []);
 
-    const done = useMemo(() => doneKeys(entries, taskId ?? ''), [entries, taskId]);
+    const totalCount = task ? (task.counts[cohort] ?? task.counts[ALL_COHORTS] ?? 0) : 0;
+    // The progress endpoint writes the count it is given, so the dialog opens on the server's
+    // number, not the one this tab loaded with. A failed read falls back to what the tab has.
+    const markDone = useCallback(async (): Promise<MarkDoneStart> => {
+        if (!task) throw new Error('No task to mark');
+        let fresh: User | undefined;
+        try {
+            fresh = (await apiRef.current.getUser()).data;
+            updateUser(fresh);
+        } catch {
+            fresh = undefined;
+        }
+        const freshProgress = fresh ? fresh.progress[task.id] : progress;
+        const count = getCurrentCount({
+            cohort,
+            requirement: task,
+            progress: freshProgress,
+            timeline: entries,
+        });
+        return { progress: freshProgress, initialCount: Math.min(count + 1, totalCount) };
+    }, [task, cohort, progress, entries, totalCount, updateUser]);
+
+    const done = useMemo(() => {
+        const marks = doneKeys(entries, sessionTaskId ?? '');
+        for (const key of passed) marks.add(key);
+        return marks;
+    }, [entries, sessionTaskId, passed]);
     const workedOn = useMemo(() => new Set(copies?.keys() ?? []), [copies]);
 
     const loadedGameRef = useRef(loadedGame);
@@ -581,33 +677,28 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
     }
     if (bookState.status === 'blocked')
         return { status: 'blocked', task, course: bookState.course };
-    if (items.length === 0) return { status: 'empty', task, book: bookState.book };
+    if (items.length === 0 || !book) return { status: 'empty', task, book: bookState.book };
     if (!current) return { status: 'loading' };
 
     let session: StudySessionState | undefined;
-    if (task) {
-        const cohort = taskCohort(task, user);
-        const progress = user.progress[task.id];
+    if (task && sessionTaskId) {
         session = {
             task,
             cohort,
             progress,
-            currentCount: getCurrentCount({
-                cohort,
-                requirement: task,
-                progress,
-                timeline: entries,
-            }),
-            totalCount: task.counts[cohort] ?? task.counts[ALL_COHORTS] ?? 0,
+            currentCount,
+            totalCount,
+            mapping,
             done,
             historyComplete,
+            markDone,
             onMarkedDone,
         };
     }
     return {
         status: 'ready',
         session,
-        book: bookState.book,
+        book,
         current,
         select,
         workedOn,
