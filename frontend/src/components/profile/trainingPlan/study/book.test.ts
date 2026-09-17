@@ -4,7 +4,15 @@ import {
     DirectoryItemTypes,
 } from '@jackstenglein/chess-dojo-common/src/database/directory';
 import { describe, expect, it } from 'vitest';
-import { concatBooks, courseBook, directoryBook, itemsOf, sliceBook } from './book';
+import {
+    chapterOf,
+    concatBooks,
+    courseBook,
+    directoryBook,
+    itemsOf,
+    neighbours,
+    sliceBook,
+} from './book';
 
 function module(overrides: Partial<CourseModule>): CourseModule {
     return {
@@ -209,5 +217,47 @@ describe('sliceBook', () => {
         const sliced = sliceBook(book, [item('a1')]);
         expect(sliced.chapters).toEqual([{ name: 'A', items: [item('a1')] }]);
         expect(book.chapters[0].items).toHaveLength(2);
+    });
+});
+
+describe('neighbours', () => {
+    const book = {
+        title: 'T',
+        skipped: 0,
+        chapters: [
+            { name: 'A', items: [item('a1'), item('a2')] },
+            { name: 'B', items: [item('b1')] },
+        ],
+    };
+
+    it('has no prev on the first item and no next on the last', () => {
+        expect(neighbours(book, item('a1'))).toEqual({ prev: undefined, next: item('a2') });
+        expect(neighbours(book, item('b1'))).toEqual({ prev: item('a2'), next: undefined });
+    });
+
+    it('crosses chapters in reading order', () => {
+        expect(neighbours(book, item('a2'))).toEqual({ prev: item('a1'), next: item('b1') });
+    });
+
+    it('is empty for a one-chapter, one-item book and for an unknown item', () => {
+        const single = { title: 'S', skipped: 0, chapters: [{ name: 'S', items: [item('s1')] }] };
+        expect(neighbours(single, item('s1'))).toEqual({ prev: undefined, next: undefined });
+        expect(neighbours(book, item('zz'))).toEqual({});
+    });
+});
+
+describe('chapterOf', () => {
+    it('finds the chapter holding the item by key', () => {
+        const book = {
+            title: 'T',
+            skipped: 0,
+            chapters: [
+                { name: 'A', items: [item('a1')] },
+                { name: 'B', items: [item('b1'), item('b2')] },
+            ],
+        };
+        expect(chapterOf(book, item('b2'))?.name).toBe('B');
+        expect(chapterOf(book, item('a1'))?.name).toBe('A');
+        expect(chapterOf(book, item('zz'))).toBeUndefined();
     });
 });

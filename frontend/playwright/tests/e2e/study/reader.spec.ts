@@ -68,7 +68,7 @@ test.describe('Reader overview', () => {
         await tile.getByTestId('reader-continue').click();
         await expect(page).toHaveURL(/\/study\/[^/?]+\?.*cohort=/);
         await expect(page.getByTestId('study-browse-notice')).toBeVisible({ timeout: 30_000 });
-        await expect(page.getByTestId('study-session')).toHaveCount(0);
+        await expect(page.getByTestId('study-mark-done')).toHaveCount(0);
 
         await page.goto('/study');
         await page
@@ -78,7 +78,7 @@ test.describe('Reader overview', () => {
             .click();
         await expect(page).toHaveURL(/\/study\/[^/?]+/);
         // The study page pages the account's games before it renders.
-        await expect(page.getByTestId('study-session')).toBeVisible({ timeout: 30_000 });
-        await expect(page.getByTestId('study-breadcrumb')).toContainText(TASK_NAME);
+        await expect(page.getByTestId('study-panel')).toBeVisible({ timeout: 30_000 });
+        await expect(page.getByTestId('study-catalog')).toContainText(TASK_NAME);
     });
 });

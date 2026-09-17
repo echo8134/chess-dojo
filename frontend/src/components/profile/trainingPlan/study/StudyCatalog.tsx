@@ -1,9 +1,10 @@
-import { Check, ExpandMore } from '@mui/icons-material';
+import { CheckCircle, ExpandMore, KeyboardDoubleArrowLeft } from '@mui/icons-material';
 import {
     Accordion,
     AccordionDetails,
     AccordionSummary,
-    Button,
+    Box,
+    IconButton,
     List,
     ListItemButton,
     ListItemText,
@@ -11,8 +12,9 @@ import {
     Typography,
 } from '@mui/material';
 import { useTranslations } from 'next-intl';
+import { useEffect, useRef } from 'react';
 import { useLocalStorage } from 'usehooks-ts';
-import { StudyBook, StudyChapter, StudyItem } from './book';
+import { chapterOf, itemsOf, StudyBook, StudyChapter, StudyItem } from './book';
 
 export interface StudyCatalogProps {
     book: StudyBook;
@@ -24,7 +26,10 @@ export interface StudyCatalogProps {
     browsing?: boolean;
     /** The count's unit of a workbook, used in the header. Empty for a set. */
     unit?: string;
+    /** The task's target in units, given once the session's count has reached it. */
+    targetReached?: number;
     onSelect: (item: StudyItem) => void;
+    onCollapse?: () => void;
 }
 
 /** The book's chapters and games. A chapter with one game is a plain row; more get an accordion. */
@@ -36,24 +41,55 @@ export function StudyCatalog({
     historyComplete,
     browsing = false,
     unit,
+    targetReached,
     onSelect,
+    onCollapse,
 }: StudyCatalogProps) {
-    const t = useTranslations('study.catalog');
+    const t = useTranslations('study');
     const [closed, setClosed] = useLocalStorage<string[]>(`study.closed.${book.title}`, []);
-    const multi = book.chapters.filter((chapter) => chapter.items.length > 1);
-    const allOpen = multi.every((chapter) => !closed.includes(chapter.name));
     const total = book.chapters.reduce((n, chapter) => n + chapter.items.length, 0);
-    const doneCount = book.chapters
-        .flatMap((chapter) => chapter.items)
-        .filter((item) => done.has(item.key)).length;
+    const doneIn = (chapter: StudyChapter) =>
+        chapter.items.filter((item) => done.has(item.key)).length;
+    const doneCount = book.chapters.reduce((n, chapter) => n + doneIn(chapter), 0);
 
-    let number = 0;
+    const currentChapter = chapterOf(book, current)?.name;
+    useEffect(() => {
+        if (currentChapter && closed.includes(currentChapter)) {
+            setClosed(closed.filter((name) => name !== currentChapter));
+        }
+    }, [currentChapter, closed, setClosed]);
+
+    const listRef = useRef<HTMLUListElement>(null);
+    const rowRef = useRef<HTMLDivElement>(null);
+    const centreCurrent = () => {
+        const list = listRef.current;
+        const row = rowRef.current;
+        if (!list || !row) return;
+        const offset = row.getBoundingClientRect().top - list.getBoundingClientRect().top;
+        list.scrollTop += offset - (list.clientHeight - row.offsetHeight) / 2;
+    };
+    useEffect(centreCurrent, [current.key]);
+    // The list has no height until the board has laid out the row, so centre again once it does.
+    useEffect(() => {
+        const list = listRef.current;
+        if (!list || typeof ResizeObserver === 'undefined') return;
+        const observer = new ResizeObserver(([entry]) => {
+            if (entry.contentRect.height > 0) {
+                centreCurrent();
+                observer.disconnect();
+            }
+        });
+        observer.observe(list);
+        return () => observer.disconnect();
+    }, []);
+
+    const numbers = new Map(itemsOf(book).map((item, index) => [item.key, index + 1]));
     const row = (item: StudyItem) => {
-        number += 1;
         const selected = item.key === current.key;
         return (
             <ListItemButton
                 key={item.key}
+                ref={selected ? rowRef : undefined}
                 selected={selected}
                 onClick={() => onSelect(item)}
                 data-testid='study-item'
@@ -62,10 +98,11 @@ export function StudyCatalog({
                     borderLeft: 3,
                     borderColor: selected ? 'primary.main' : 'transparent',
                     py: 0.75,
+                    gap: 1,
                 }}
             >
                 <Typography sx={{ width: 28, color: 'text.secondary', flexShrink: 0 }}>
-                    {number}
+                    {numbers.get(item.key)}
                 </Typography>
                 <ListItemText
                     primary={item.name}
@@ -77,9 +114,26 @@ export function StudyCatalog({
                         },
                     }}
                 />
-                {done.has(item.key) && (
-                    <Check color='success' fontSize='small' data-testid='study-item-done' />
-                )}
+                {!browsing &&
+                    (done.has(item.key) ? (
+                        <CheckCircle
+                            color='success'
+                            fontSize='small'
+                            data-testid='study-item-done'
+                        />
+                    ) : (
+                        <Box
+                            aria-hidden
+                            sx={{
+                                width: 20,
+                                height: 20,
+                                flexShrink: 0,
+                                border: 1,
+                                borderColor: 'divider',
+                                borderRadius: '50%',
+                            }}
+                        />
+                    ))}
             </ListItemButton>
         );
     };
@@ -101,9 +155,21 @@ export function StudyCatalog({
                 disableGutters
                 elevation={0}
                 square
+                // A closed chapter's rows have no height until it has opened.
+                slotProps={{
+                    transition: {
+                        onEntered: c.name === currentChapter ? centreCurrent : undefined,
+                    },
+                }}
             >
                 <AccordionSummary expandIcon={<ExpandMore />}>
-                    <Typography>{c.name}</Typography>
+                    <Typography sx={{ flexGrow: 1 }}>{c.name}</Typography>
+                    <Typography
+                        variant='body2'
+                        sx={{ color: 'text.secondary', fontVariantNumeric: 'tabular-nums', pr: 1 }}
+                    >
+                        {browsing ? c.items.length : `${doneIn(c)} / ${c.items.length}`}
+                    </Typography>
                 </AccordionSummary>
                 <AccordionDetails sx={{ p: 0 }}>
                     <List disablePadding>{c.items.map(row)}</List>
@@ -113,39 +179,62 @@ export function StudyCatalog({
     };
 
     return (
-        <Stack data-testid='study-catalog' sx={{ minWidth: 0 }}>
-            <Stack sx={{ px: 2, pb: 1 }}>
-                <Typography variant='h6'>{book.title}</Typography>
-                <Typography variant='body2' sx={{ color: 'text.secondary' }}>
+        <Stack data-testid='study-catalog' sx={{ minWidth: 0, minHeight: 0, flexGrow: 1 }}>
+            <Stack sx={{ px: 2, pt: 1.5, pb: 1, flexShrink: 0 }}>
+                <Stack direction='row' sx={{ alignItems: 'flex-start', gap: 1 }}>
+                    <Typography variant='h6' sx={{ flexGrow: 1 }}>
+                        {book.title}
+                    </Typography>
+                    {onCollapse && (
+                        <IconButton
+                            onClick={onCollapse}
+                            aria-label={t('catalog.collapse')}
+                            data-testid='study-catalog-collapse'
+                            size='small'
+                            sx={{ mr: -1 }}
+                        >
+                            <KeyboardDoubleArrowLeft />
+                        </IconButton>
+                    )}
+                </Stack>
+                <Typography
+                    variant='body2'
+                    sx={{ color: 'text.secondary' }}
+                    data-testid='study-catalog-progress'
+                >
                     {browsing
-                        ? t('browsing', { total })
+                        ? t('catalog.browsing', { total })
                         : unit
-                          ? t('studiedUnit', { done: doneCount, total, unit })
-                          : t('studied', { done: doneCount, total })}
+                          ? t('catalog.studiedUnit', { done: doneCount, total, unit })
+                          : t('catalog.studied', { done: doneCount, total })}
                 </Typography>
                 {!historyComplete && (
                     <Typography variant='caption' sx={{ color: 'text.secondary' }}>
-                        {t('historyLoading')}
+                        {t('catalog.historyLoading')}
                     </Typography>
                 )}
                 {book.skipped > 0 && (
                     <Typography variant='caption' sx={{ color: 'text.secondary' }}>
-                        {t('skipped', { count: book.skipped })}
+                        {t('catalog.skipped', { count: book.skipped })}
                     </Typography>
                 )}
-                {multi.length > 0 && (
-                    <Button
-                        size='small'
-                        sx={{ alignSelf: 'flex-start', mt: 0.5 }}
-                        onClick={() =>
-                            setClosed(allOpen ? multi.map((chapter) => chapter.name) : [])
-                        }
+                {targetReached !== undefined && unit && (
+                    <Typography
+                        variant='body2'
+                        color='success.main'
+                        data-testid='study-target-reached'
                     >
-                        {allOpen ? t('collapseAll') : t('expandAll')}
-                    </Button>
+                        {t('session.targetReached', { total: targetReached, unit })}
+                    </Typography>
                 )}
             </Stack>
-            <List disablePadding>{book.chapters.map(chapter)}</List>
+            <List
+                ref={listRef}
+                disablePadding
+                sx={{ flexGrow: 1, minHeight: 0, overflowY: 'auto' }}
+            >
+                {book.chapters.map(chapter)}
+            </List>
         </Stack>
     );
 }

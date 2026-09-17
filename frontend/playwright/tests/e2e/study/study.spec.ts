@@ -22,15 +22,28 @@ async function idToken(page: Page): Promise<string> {
     return cookie.value;
 }
 
-/** The underboard folds its overflow tabs into a More menu when narrow. */
-async function openShareTab(page: Page) {
-    const share = page.getByTestId('underboard-button-share').first();
-    if (await share.isVisible()) {
-        await share.click();
-        return;
+/** Click a square by name. Chessground moves a piece after a click on its square and one on the target. */
+async function clickSquare(page: Page, square: string) {
+    const board = page.locator('cg-board');
+    const bounds = await board.boundingBox();
+    if (!bounds) throw new Error('no board');
+    const classes = await page.getByTestId('chessground-board').first().getAttribute('class');
+    const flipped = classes?.includes('orientation-black') ?? false;
+    let file = square.charCodeAt(0) - 'a'.charCodeAt(0);
+    let rank = Number(square[1]) - 1;
+    if (flipped) {
+        file = 7 - file;
+        rank = 7 - rank;
     }
-    await page.getByRole('button', { name: 'More' }).last().click();
-    await page.getByRole('menuitem', { name: /share/i }).click();
+    const size = bounds.width / 8;
+    await page.mouse.click(bounds.x + (file + 0.5) * size, bounds.y + (7.5 - rank) * size);
+}
+
+/** Play a white first move as a new variation from the starting position. */
+async function playFirstMove(page: Page, from: string, to: string) {
+    await page.getByRole('button', { name: 'first move', exact: true }).click();
+    await clickSquare(page, from);
+    await clickSquare(page, to);
 }
 
 /** The task and the user's progress on it, from the plan; skips the test when the page cannot run yet. */
@@ -91,7 +104,8 @@ test.describe('Study page', () => {
 
         await page.goto(`/study/${task?.id}`);
         await expect(page.getByTestId('study-catalog')).toBeVisible();
-        await expect(page.getByTestId('study-breadcrumb')).toContainText(TASK_NAME);
+        await expect(page.getByTestId('study-catalog')).toContainText(TASK_NAME);
+        await expect(page.getByTestId('study-panel')).toBeVisible();
 
         const rows = page.getByTestId('study-item');
         await expect(rows.first()).toBeVisible();
@@ -104,11 +118,10 @@ test.describe('Study page', () => {
         await expect(page.getByTestId('study-your-copy')).toHaveCount(0);
 
         // The first edit creates a copy. The second updates it.
-        const comments = page.getByRole('textbox', { name: 'Comments' });
         const created = page.waitForResponse(
             (r) => r.url().endsWith('/game2') && r.request().method() === 'POST',
         );
-        await comments.fill('Study note one');
+        await playFirstMove(page, 'a2', 'a3');
         const createResp = await created;
         expect(createResp.status()).toBe(200);
         const game = (await createResp.json()) as { cohort: string; id: string; pgn: string };
@@ -118,19 +131,26 @@ test.describe('Study page', () => {
         const updated = page.waitForResponse(
             (r) => r.url().includes('/game2/') && r.request().method() === 'PUT',
         );
-        await comments.fill('Study note one, then two');
+        await playFirstMove(page, 'h2', 'h4');
         expect((await updated).status()).toBe(200);
         await expect(page.getByTestId('study-your-copy')).toBeVisible();
 
         // Reopening loads the copy with both edits.
         await page.goto(`/study/${task?.id}?item=${encodeURIComponent(itemKey ?? '')}`);
         await expect(page.getByTestId('study-your-copy')).toBeVisible();
-        await expect(page.getByText('Study note one, then two').first()).toBeVisible();
-        await openShareTab(page);
-        await expect(page.getByRole('button', { name: 'Copy URL' })).toBeVisible();
-        await expect(page.getByRole('button', { name: 'Copy PGN' })).toHaveCount(0);
+        const moves = page.getByTestId('pgn-text');
+        await expect(moves).toContainText('a3');
+        await expect(moves).toContainText('h4');
+        // The course forbids export, so the board's copy menu offers no PGN.
+        await page.getByRole('button', { name: 'Copy', exact: true }).click();
+        await expect(page.getByRole('menuitem', { name: 'Copy URL' })).toBeVisible();
+        await expect(page.getByRole('menuitem', { name: 'Copy PGN' })).toHaveCount(0);
+        await page.keyboard.press('Escape');
 
         // Marking done sends the game's key, moves the count by one and checks the row.
+        const progressLine = page.getByTestId('study-catalog-progress');
+        const doneBefore = Number.parseInt((await progressLine.textContent()) ?? '', 10);
+        expect(Number.isNaN(doneBefore)).toBe(false);
         await page.getByTestId('study-mark-done').click();
         const posted = page.waitForResponse(
             (r) => r.url().endsWith('/user/progress/v3') && r.request().method() === 'POST',
@@ -149,7 +169,7 @@ test.describe('Study page', () => {
             timelineEntry: { id: string; requirementId: string };
         };
         written.entry = body.timelineEntry;
-        await expect(page.getByTestId('study-breadcrumb')).toContainText(`${sent.newCount} / `);
+        await expect(progressLine).toContainText(`${doneBefore + 1} of`);
         await expect(
             page.locator(`[data-item-key="${itemKey}"]`).getByTestId('study-item-done'),
         ).toBeVisible();

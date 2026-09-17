@@ -3,7 +3,7 @@ import { InfoOutlined } from '@mui/icons-material';
 import { Button, Stack, Typography } from '@mui/material';
 import { useTranslations } from 'next-intl';
 
-/** The row under the board when a course is open without a task. Nothing is timed or counted here. */
+/** The panel's notice when a course is open without a task. Nothing is timed or counted here. */
 export function StudyBrowseNotice() {
     const t = useTranslations('study');
     return (

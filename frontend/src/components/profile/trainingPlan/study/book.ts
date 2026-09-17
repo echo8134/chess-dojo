@@ -134,3 +134,21 @@ export function sliceBook(book: StudyBook, items: StudyItem[]): StudyBook {
         .filter((chapter) => chapter.items.length > 0);
     return { ...book, chapters };
 }
+
+/** The chapter holding the item, matched by key. */
+export function chapterOf(book: StudyBook, item: StudyItem): StudyChapter | undefined {
+    return book.chapters.find((chapter) => chapter.items.some((i) => i.key === item.key));
+}
+
+/** The items before and after the current one in reading order, across chapters. */
+export function neighbours(
+    book: StudyBook,
+    current: StudyItem,
+): { prev?: StudyItem; next?: StudyItem } {
+    const items = itemsOf(book);
+    const index = items.findIndex((item) => item.key === current.key);
+    if (index < 0) {
+        return {};
+    }
+    return { prev: items[index - 1], next: items[index + 1] };
+}

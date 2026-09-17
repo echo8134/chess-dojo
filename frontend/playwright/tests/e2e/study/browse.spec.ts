@@ -50,14 +50,20 @@ test.describe('Browse mode', () => {
 
         await expect(page.getByTestId('study-catalog')).toBeVisible();
         await expect(page.getByTestId('study-item').first()).toBeVisible();
-        await expect(page.getByTestId('study-breadcrumb')).toContainText('Browsing');
-        await expect(page.getByTestId('study-breadcrumb')).toContainText(course.name);
+        await expect(page.getByTestId('study-catalog')).toContainText(course.name);
+        await expect(page.getByTestId('study-catalog-progress')).toBeVisible();
         await expect(page.getByTestId('chessground-board').first()).toBeVisible();
 
+        await expect(page.getByTestId('study-panel')).toBeVisible();
         await expect(page.getByTestId('study-browse-notice')).toBeVisible();
-        await expect(page.getByTestId('study-session')).toHaveCount(0);
         await expect(page.getByTestId('study-mark-done')).toHaveCount(0);
         await expect(page.getByTestId('study-start-timer')).toHaveCount(0);
         await expect(page.getByTestId('study-pause-timer')).toHaveCount(0);
+
+        await page.getByTestId('study-catalog-collapse').click();
+        await expect(page.getByTestId('study-catalog')).toHaveCount(0);
+        await expect(page.getByTestId('study-catalog-expand')).toBeVisible();
+        await page.getByTestId('study-catalog-expand').click();
+        await expect(page.getByTestId('study-catalog')).toBeVisible();
     });
 });

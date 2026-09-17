@@ -4,14 +4,14 @@ import { RequestSnackbar } from '@/api/Request';
 import PurchaseCoursePage from '@/app/[locale]/(scoreboard)/courses/[type]/[id]/[chapter]/[module]/PurchaseCoursePage';
 import { useAuth, useFreeTier } from '@/auth/Auth';
 import PgnBoard from '@/board/pgn/PgnBoard';
-import { DefaultUnderboardTab } from '@/board/pgn/boardTools/underboard/underboardTabs';
+import { CustomUnderboardTab } from '@/board/pgn/boardTools/underboard/underboardTabs';
 import { Link } from '@/components/navigation/Link';
 import { TimelineProvider } from '@/components/profile/activity/useTimeline';
 import { ProgressUpdater } from '@/components/profile/trainingPlan/ProgressUpdater';
-import { StudyBrowseNotice } from '@/components/profile/trainingPlan/study/StudyBrowseNotice';
 import { StudyCatalog } from '@/components/profile/trainingPlan/study/StudyCatalog';
 import { StudyLayout } from '@/components/profile/trainingPlan/study/StudyLayout';
-import { StudySession } from '@/components/profile/trainingPlan/study/StudySession';
+import { StudyPanel } from '@/components/profile/trainingPlan/study/StudyPanel';
+import { StudyItem } from '@/components/profile/trainingPlan/study/book';
 import { taskTitle } from '@/components/profile/trainingPlan/study/selectors';
 import {
     MarkDoneStart,
@@ -22,6 +22,7 @@ import {
 import { GameContext } from '@/context/useGame';
 import { useNextSearchParams } from '@/hooks/useNextSearchParams';
 import LoadingPage from '@/loading/LoadingPage';
+import { MenuBook } from '@mui/icons-material';
 import {
     Button,
     Container,
@@ -35,16 +36,9 @@ import {
 import { useTranslations } from 'next-intl';
 import { useNavigationGuard } from 'next-navigation-guard';
 import { useEffect, useRef, useState } from 'react';
+import { useLocalStorage } from 'usehooks-ts';
 
-const STUDY_TABS = [
-    DefaultUnderboardTab.Tags,
-    DefaultUnderboardTab.Editor,
-    DefaultUnderboardTab.Comments,
-    DefaultUnderboardTab.Explorer,
-    DefaultUnderboardTab.Clocks,
-    DefaultUnderboardTab.Share,
-    DefaultUnderboardTab.Settings,
-];
+const READER_TAB = 'reader';
 
 const NO_DONE_MARKS = new Set<string>();
 
@@ -123,9 +117,11 @@ function StudyContent({ source }: { source: StudySource }) {
 function StudyReadyView({ study }: { study: StudyReady }) {
     const t = useTranslations('study');
     const tGuard = useTranslations('games.unsavedNavigationGuard');
+    const tNav = useTranslations('navbar');
     const [marking, setMarking] = useState<MarkDoneStart>();
     const markingRef = useRef(false);
     const [blockedSelect, setBlockedSelect] = useState(false);
+    const [catalogOpen, setCatalogOpen] = useLocalStorage('study.catalogOpen', true);
 
     // The board's own guard only covers a saved game; until the copy exists, this page holds the edits.
     const guard = useNavigationGuard({ enabled: study.pendingEdits });
@@ -136,24 +132,52 @@ function StudyReadyView({ study }: { study: StudyReady }) {
         return () => window.removeEventListener('beforeunload', onBeforeUnload);
     }, [study.pendingEdits]);
 
-    const { session, book, current, board } = study;
+    const { session, book, current, board, select } = study;
     const isDone = session?.done.has(current.key) ?? false;
+    const hasCopy = Boolean(board?.context.game) && current.kind === 'canonical';
+    const targetReached =
+        session?.mapping.unit && session.currentCount >= session.totalCount
+            ? session.totalCount - (session.task.startCount ?? 0)
+            : undefined;
+
+    const onSelect = (item: StudyItem) => {
+        if (!select(item)) setBlockedSelect(true);
+    };
+    const onMarkDone = () => {
+        if (!session || markingRef.current) return;
+        markingRef.current = true;
+        session
+            .markDone()
+            .then(setMarking, () => undefined)
+            .finally(() => {
+                markingRef.current = false;
+            });
+    };
+
+    // The panel is the board's only right tab, so no tab strip shows.
+    const rightTabs: CustomUnderboardTab[] = [
+        {
+            name: READER_TAB,
+            tooltip: tNav('reader'),
+            icon: <MenuBook />,
+            element: (
+                <StudyPanel
+                    book={book}
+                    current={current}
+                    session={session}
+                    hasCopy={hasCopy}
+                    isDone={isDone}
+                    onMarkDone={onMarkDone}
+                    onSelect={onSelect}
+                />
+            ),
+        },
+    ];
 
     return (
         <>
             <StudyLayout
-                breadcrumb={
-                    <Typography
-                        variant='body2'
-                        sx={{ color: 'text.secondary' }}
-                        data-testid='study-breadcrumb'
-                    >
-                        {session
-                            ? `${session.task.category} / ${book.title} · ${session.currentCount} / ${session.totalCount}`
-                            : t('browse.breadcrumb', { title: book.title })}
-                    </Typography>
-                }
-                catalog={
+                catalog={(onCollapse) => (
                     <StudyCatalog
                         book={book}
                         current={current}
@@ -162,65 +186,34 @@ function StudyReadyView({ study }: { study: StudyReady }) {
                         historyComplete={session?.historyComplete ?? true}
                         browsing={!session}
                         unit={session?.mapping.unit}
-                        onSelect={(item) => {
-                            if (!study.select(item)) setBlockedSelect(true);
-                        }}
+                        targetReached={targetReached}
+                        onSelect={onSelect}
+                        onCollapse={onCollapse}
                     />
-                }
-                board={
-                    board ? (
-                        <GameContext.Provider value={board.context}>
-                            {board.context.game && current.kind === 'canonical' && (
-                                <Typography
-                                    variant='caption'
-                                    sx={{ color: 'dojoOrange.main' }}
-                                    data-testid='study-your-copy'
-                                >
-                                    {t('yourCopy')}
-                                </Typography>
-                            )}
-                            <PgnBoard
-                                key={board.key}
-                                pgn={board.pgn}
-                                startOrientation={board.orientation}
-                                onInitialize={study.onBoardInitialize}
-                                disableExport={board.disableExport}
-                                underboardTabs={STUDY_TABS}
-                                initialUnderboardTab={DefaultUnderboardTab.Editor}
-                                allowMoveDeletion
-                                allowDeleteBefore
-                            />
-                        </GameContext.Provider>
-                    ) : (
-                        <LoadingPage />
-                    )
-                }
-                session={
-                    session ? (
-                        <StudySession
-                            task={session.task}
-                            item={current}
-                            currentCount={session.currentCount}
-                            totalCount={session.totalCount}
-                            startCount={session.task.startCount ?? 0}
-                            unit={session.mapping.unit}
-                            isDone={isDone}
-                            onMarkDone={() => {
-                                if (markingRef.current) return;
-                                markingRef.current = true;
-                                session
-                                    .markDone()
-                                    .then(setMarking, () => undefined)
-                                    .finally(() => {
-                                        markingRef.current = false;
-                                    });
-                            }}
+                )}
+                catalogOpen={catalogOpen}
+                onToggleCatalog={() => setCatalogOpen(!catalogOpen)}
+            >
+                {board ? (
+                    <GameContext.Provider value={board.context}>
+                        <PgnBoard
+                            key={board.key}
+                            pgn={board.pgn}
+                            startOrientation={board.orientation}
+                            onInitialize={study.onBoardInitialize}
+                            disableExport={board.disableExport}
+                            showPlayerHeaders={false}
+                            underboardTabs={[]}
+                            rightTabs={rightTabs}
+                            initialRightTab={READER_TAB}
+                            allowMoveDeletion
+                            allowDeleteBefore
                         />
-                    ) : (
-                        <StudyBrowseNotice />
-                    )
-                }
-            />
+                    </GameContext.Provider>
+                ) : (
+                    <LoadingPage />
+                )}
+            </StudyLayout>
 
             <RequestSnackbar request={study.copyRequest} />
 
