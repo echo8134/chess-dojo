@@ -150,6 +150,7 @@ services:
     path: chatBotService
     params:
       httpApiId: ${chess-dojo-scheduler.HttpApiId}
+      apiAuthorizer: ${chess-dojo-scheduler.serviceAuthorizer}
 
   yearReviewService:
     path: yearReviewService

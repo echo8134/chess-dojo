@@ -1,49 +1,42 @@
 import { z } from 'zod';
 
-/** Verifies a request to send a chat message to the bot. */
-export const ChatRequestSchema = z.object({
-    /** The message to send to the bot. */
+/** Accepts message text only. The server chooses the conversation. */
+export const ChatRequestSchema = z.strictObject({
+    /** Message text. */
     message: z.string(),
-    /** The ID of the thread to send the message in. */
-    threadId: z.string(),
-    /** The user's ID the thread belongs to. */
-    resourceId: z.string(),
 });
 
-/** A request to send a chat message to the bot. */
+/** A chat message request. */
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;
 
-/** The response from the bot to a chat request. */
+/** The bot response. */
 export interface ChatResponse {
-    /** The content of the response. */
+    /** Response text. */
     text: string;
 }
 
-/** Verifies a request to get the bot message history. */
-export const GetChatHistoryRequestSchema = z.object({
-    /** The ID of the thread to get the messages from. */
-    threadId: z.string(),
-});
+/** History requests accept no conversation identifiers. */
+export const GetChatHistoryRequestSchema = z.strictObject({});
 
-/** A request to get the bot message history. */
+/** A chat history request. */
 export type GetChatHistoryRequest = z.infer<typeof GetChatHistoryRequestSchema>;
 
-/** The response from a GetChatHistory request. */
+/** The chat history. */
 export interface GetChatHistoryResponse {
-    /** The messages in the history. */
+    /** Conversation messages. */
     messages: Message[];
 }
 
-/** A single message sent to/from the bot. */
+/** A user or bot message. */
 export interface Message {
-    /** The id of the message. */
+    /** Message ID. */
     id: string;
-    /** The role of the sender. */
+    /** Sender role. */
     role: 'user' | 'assistant';
-    /** The content of the message. */
+    /** Message text. */
     content: string;
-    /** The date the message was created. */
+    /** Creation date. */
     createdAt: string;
-    /** Currently required by the Mastra backend, but we never set any values. */
+    /** Required by Mastra. Always empty. */
     toolInvocations: never[];
 }

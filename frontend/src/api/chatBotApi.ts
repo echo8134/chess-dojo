@@ -6,27 +6,36 @@ import {
 import { AxiosResponse } from 'axios';
 import { axiosService } from './axiosService';
 
-/**
- * Sends a message to the chat bot.
- * @param request The request to send.
- * @returns An Axios Response containing the bot's response.
- */
-export async function sendMessage(request: ChatRequest): Promise<AxiosResponse<ChatResponse>> {
-    return await axiosService.post(`/public/dojoai/chat`, request, {
-        functionName: 'sendMessage',
-    });
+export type ChatSession = { kind: 'member' } | { kind: 'guest'; token: string };
+
+export async function sendMessage(
+    session: ChatSession,
+    request: ChatRequest,
+    signal?: AbortSignal,
+): Promise<AxiosResponse<ChatResponse>> {
+    return await axiosService.post(
+        session.kind === 'member' ? '/dojoai/chat' : '/public/dojoai/chat',
+        request,
+        {
+            headers:
+                session.kind === 'guest' ? { Authorization: `Bearer ${session.token}` } : undefined,
+            functionName: 'sendMessage',
+            signal,
+        },
+    );
 }
 
-/**
- * Gets the chat bot history for the given thread.
- * @param threadId The ID of the thread to get.
- * @returns The message history.
- */
 export async function getChatHistory(
-    threadId: string,
+    session: ChatSession,
+    signal?: AbortSignal,
 ): Promise<AxiosResponse<GetChatHistoryResponse>> {
-    return await axiosService.get(`/public/dojoai/chat`, {
-        params: { threadId },
-        functionName: 'getChatHistory',
-    });
+    return await axiosService.get(
+        session.kind === 'member' ? '/dojoai/chat' : '/public/dojoai/chat',
+        {
+            headers:
+                session.kind === 'guest' ? { Authorization: `Bearer ${session.token}` } : undefined,
+            functionName: 'getChatHistory',
+            signal,
+        },
+    );
 }

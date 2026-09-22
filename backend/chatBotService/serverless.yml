@@ -28,11 +28,32 @@ functions:
     timeout: 25
     events:
       - httpApi:
-          path: /public/dojoai/chat
+          path: /dojoai/chat
           method: post
+          authorizer:
+            type: jwt
+            id: ${param:apiAuthorizer}
 
   history:
     handler: chatHistory.handler
+    events:
+      - httpApi:
+          path: /dojoai/chat
+          method: get
+          authorizer:
+            type: jwt
+            id: ${param:apiAuthorizer}
+
+  guestChat:
+    handler: chat.guestHandler
+    timeout: 25
+    events:
+      - httpApi:
+          path: /public/dojoai/chat
+          method: post
+
+  guestHistory:
+    handler: chatHistory.guestHandler
     events:
       - httpApi:
           path: /public/dojoai/chat

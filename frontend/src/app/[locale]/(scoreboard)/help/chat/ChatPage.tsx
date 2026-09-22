@@ -1,7 +1,7 @@
 'use client';
 
-import { getChatHistory, sendMessage } from '@/api/chatBotApi';
-import { useAuth } from '@/auth/Auth';
+import { ChatSession, getChatHistory, sendMessage } from '@/api/chatBotApi';
+import { AuthStatus, useAuth } from '@/auth/Auth';
 import { ChatInput } from '@/components/help/chat/ChatInput';
 import { ChatMessage } from '@/components/help/chat/ChatMessage';
 import LoadingPage from '@/loading/LoadingPage';
@@ -14,13 +14,30 @@ import { useEffect, useRef, useState } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 
 export function ChatPage() {
+    const { user, status } = useAuth();
+    if (status === AuthStatus.Loading) {
+        return <LoadingPage />;
+    }
+
+    const member = status === AuthStatus.Authenticated ? user : undefined;
+    return (
+        <ChatConversation
+            key={member ? `member:${member.username}` : 'guest'}
+            kind={member ? 'member' : 'guest'}
+        />
+    );
+}
+
+function ChatConversation({ kind }: { kind: ChatSession['kind'] }) {
+    const [session] = useState<ChatSession>(() =>
+        kind === 'member' ? { kind } : { kind, token: uuidv4() },
+    );
     const t = useTranslations('help.chat');
     const [messages, setMessages] = useState<Message[]>([]);
     const [isThinking, setIsThinking] = useState(false);
     const [isLoadingHistory, setIsLoadingHistory] = useState(true);
     const messagesEndRef = useRef<HTMLDivElement | null>(null);
-    const [anonId] = useState(uuidv4());
-    const { user } = useAuth();
+    const requestController = useRef(new AbortController());
 
     const SIGNED_IN_QUESTIONS = [
         t('signedInQuestion0'),
@@ -33,30 +50,29 @@ export function ChatPage() {
         t('signedOutQuestion2'),
     ];
 
-    let resourceId = '';
-    let threadId = '';
-    if (!user) {
-        resourceId = anonId;
-        threadId = `${anonId}-thread`;
-    } else {
-        resourceId = user.username;
-        threadId = `${user.username}-thread`;
-    }
-
     useEffect(() => {
+        if (requestController.current.signal.aborted) {
+            requestController.current = new AbortController();
+        }
+        const controller = requestController.current;
+        const { signal } = controller;
         const fetchHistory = async () => {
             try {
-                const res = await getChatHistory(threadId);
-                setMessages(res.data.messages);
+                const res = await getChatHistory(session, signal);
+                if (!signal.aborted) setMessages(res.data.messages);
             } catch (err) {
+                if (signal.aborted) return;
                 logger.error?.('[ChatPage] Failed to fetch history:', err);
             } finally {
-                setIsLoadingHistory(false);
+                if (!signal.aborted) setIsLoadingHistory(false);
             }
         };
 
         void fetchHistory();
-    }, [threadId]);
+        return () => {
+            controller.abort();
+        };
+    }, [session]);
 
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -93,9 +109,10 @@ export function ChatPage() {
         }
 
         setIsThinking(true);
+        const { signal } = requestController.current;
 
         try {
-            const res = await sendMessage({ message: text, threadId, resourceId });
+            const res = await sendMessage(session, { message: text }, signal);
             setMessages((prev) => [
                 ...prev,
                 {
@@ -107,6 +124,7 @@ export function ChatPage() {
                 },
             ]);
         } catch (err) {
+            if (signal.aborted) return;
             logger.error?.('[ChatPage] Send message failed:', err);
             setMessages((prev) => [
                 ...prev,
@@ -119,11 +137,12 @@ export function ChatPage() {
                 },
             ]);
         } finally {
-            setIsThinking(false);
+            if (!signal.aborted) setIsThinking(false);
         }
     };
 
-    const suggestedQuestions = user ? SIGNED_IN_QUESTIONS : SIGNED_OUT_QUESTIONS;
+    const suggestedQuestions =
+        session.kind === 'member' ? SIGNED_IN_QUESTIONS : SIGNED_OUT_QUESTIONS;
 
     return (
         <Box
