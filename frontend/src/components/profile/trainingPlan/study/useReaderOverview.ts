@@ -11,7 +11,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { concatBooks, courseBook, itemsOf, StudyBook } from './book';
 import { loadCourse } from './courseCache';
 import { buildOverview, OverviewModel } from './overview';
-import { isWorkbook, taskCohort } from './selectors';
+import { isStudyEntry, isWorkbook, taskCohort } from './selectors';
 
 /** Maximum timeline pages to search for each set's latest study entry. */
 const TIMELINE_PAGE_CAP = 20;
@@ -96,7 +96,7 @@ export function useReaderOverview(): ReaderOverviewState {
                 loaded.push(...resp.entries);
                 setEntries([...loaded]);
                 for (const entry of resp.entries) {
-                    if (entry.studyInfo) missing.delete(entry.requirementId);
+                    if (isStudyEntry(entry)) missing.delete(entry.requirementId);
                 }
                 startKey = resp.lastEvaluatedKey || undefined;
                 pages += 1;

@@ -57,6 +57,41 @@ describe('buildOverview', () => {
         expect(model.cohorts[21]).toBe('2400+');
     });
 
+    it('names the item after the last one marked in the newest study entry', () => {
+        const newer = {
+            ...memberEntries[0],
+            id: 'e0',
+            createdAt: '2026-09-11T00:00:00Z',
+            studyInfo: {
+                items: [
+                    {
+                        key: cohortBook.chapters[0].items[0].key,
+                        name: 'Game 1',
+                        minutes: 10,
+                        at: '2026-09-11T00:00:00Z',
+                    },
+                    {
+                        key: cohortBook.chapters[1].items[0].key,
+                        name: 'Game 2',
+                        minutes: 10,
+                        at: '2026-09-11T00:10:00Z',
+                    },
+                ],
+            },
+        };
+        const model = buildOverview({
+            user: member,
+            requirements,
+            courses,
+            entries: [memberEntries[0], newer],
+            books,
+        });
+        expect(model.cohortStudies[0]).toMatchObject({
+            lastEntry: { id: 'e0' },
+            next: { name: 'Game 3' },
+        });
+    });
+
     it('starts a new member on the first game with nothing else', () => {
         const model = buildOverview({
             user: user({ dojoCohort: '1800-1900' }),

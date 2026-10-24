@@ -159,11 +159,14 @@ test.describe('Study page', () => {
         const resp = await posted;
         expect(resp.status()).toBe(200);
         const sent = resp.request().postDataJSON() as {
-            studyInfo?: { itemKey: string };
+            studyInfo?: { items: { key: string; name: string; minutes: number; at: string }[] };
             newCount: number;
             previousCount: number;
         };
-        expect(sent.studyInfo?.itemKey).toBe(itemKey);
+        expect(sent.studyInfo?.items).toHaveLength(1);
+        expect(sent.studyInfo?.items[0].key).toBe(itemKey);
+        expect(sent.studyInfo?.items[0].minutes).toBeGreaterThanOrEqual(0);
+        expect(Date.parse(sent.studyInfo?.items[0].at ?? '')).not.toBeNaN();
         expect(sent.newCount).toBe(sent.previousCount + 1);
         const body = (await resp.json()) as {
             timelineEntry: { id: string; requirementId: string };

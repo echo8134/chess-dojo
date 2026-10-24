@@ -38,6 +38,7 @@ export function CohortBlock({ studies }: { studies: CohortStudy[] }) {
                 const continueHref = `/study/${study.task.id}${query}`;
                 const contentsHref = `/study/${study.task.id}${study.browse ? `?cohort=${study.cohort}` : ''}`;
                 const action = study.browse ? t('read') : started ? t('continue') : t('start');
+                const lastItem = study.lastEntry?.studyInfo.items.at(-1);
                 return (
                     <Card
                         key={study.task.id}
@@ -165,10 +166,10 @@ export function CohortBlock({ studies }: { studies: CohortStudy[] }) {
                                             : t('openToSee'))}
                                 </Typography>
                                 <Typography variant='body2' sx={{ color: 'text.secondary' }}>
-                                    {study.lastEntry?.studyInfo
+                                    {lastItem
                                         ? t('lastStudied', {
-                                              name: study.lastEntry.studyInfo.itemName,
-                                              when: relativeDate(study.lastEntry.createdAt),
+                                              name: lastItem.name,
+                                              when: relativeDate(lastItem.at),
                                           })
                                         : t('nothingStudied')}
                                 </Typography>

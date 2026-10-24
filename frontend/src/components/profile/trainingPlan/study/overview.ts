@@ -9,7 +9,7 @@ import {
 import { TimelineEntry } from '@/database/timeline';
 import { ALL_COHORTS, compareCohorts, dojoCohorts, User } from '@/database/user';
 import { itemsOf, StudyBook, StudyItem } from './book';
-import { isWorkbook, taskCohort, taskTitle } from './selectors';
+import { isStudyEntry, isWorkbook, StudyEntry, taskCohort, taskTitle } from './selectors';
 
 export interface OverviewInput {
     user: User;
@@ -37,7 +37,7 @@ export interface CohortStudy {
     total: number;
     minutes: number;
     courseName?: string;
-    lastEntry?: TimelineEntry;
+    lastEntry?: StudyEntry;
     /** The task's name with the cohort's count in it. */
     name: string;
     /** For a set, the item after the last studied one, or the first. A workbook names a position. */
@@ -92,12 +92,12 @@ function courseOf(courses: Course[], material: TaskMaterial | undefined): Course
     return courses.find((c) => c.type === material.courseType && c.id === material.courseId);
 }
 
-function nextItem(book: StudyBook | undefined, lastEntry: TimelineEntry | undefined) {
+function nextItem(book: StudyBook | undefined, lastEntry: StudyEntry | undefined) {
     if (!book) {
         return undefined;
     }
     const items = itemsOf(book);
-    const lastKey = lastEntry?.studyInfo?.itemKey;
+    const lastKey = lastEntry?.studyInfo.items.at(-1)?.key;
     const index = lastKey ? items.findIndex((item) => item.key === lastKey) : -1;
     return items[index + 1] ?? items[0];
 }
@@ -115,7 +115,9 @@ export function buildOverview(input: OverviewInput): OverviewModel {
         .map((task) => {
             const cohort = browse ? viewCohort : taskCohort(task, user);
             const progress = user.progress[task.id];
-            const lastEntry = entries.find((e) => e.requirementId === task.id && e.studyInfo);
+            const lastEntry = entries.find(
+                (e): e is StudyEntry => e.requirementId === task.id && isStudyEntry(e),
+            );
             const workbook = isWorkbook(task);
             const start = workbook ? task.startCount : 0;
             const pointer = getCurrentCount({

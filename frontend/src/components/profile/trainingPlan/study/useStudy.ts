@@ -14,7 +14,6 @@ import {
     getCurrentCount,
     isRequirement,
     Requirement,
-    RequirementProgress,
     TaskMaterial,
 } from '@/database/requirement';
 import { TimelineEntry } from '@/database/timeline';
@@ -22,6 +21,7 @@ import { ALL_COHORTS, User } from '@/database/user';
 import { useNextSearchParams } from '@/hooks/useNextSearchParams';
 import { Chess, Event, EventType } from '@jackstenglein/chess';
 import { GameImportTypes } from '@jackstenglein/chess-dojo-common/src/database/game';
+import { DateTime } from 'luxon';
 import { MutableRefObject, use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     CanonicalItem,
@@ -41,7 +41,9 @@ import {
     chooseCurrent,
     cohortSlice,
     countsItems,
+    dayEntry,
     doneKeys,
+    editDayEntry,
     pointerDone,
     presetMode,
     resolveMode,
@@ -82,12 +84,14 @@ export interface StudySessionState {
     historyComplete: boolean;
     /**
      * Posts the item as done with the timer's minutes. The count rises by one when the item is
-     * the unit and stays where it is otherwise.
+     * the unit and stays where it is otherwise. The day's first mark creates the entry and later
+     * marks grow it, so a sitting is one card in the feed.
      */
     markItemDone: (item: StudyItem) => Promise<void>;
     /**
-     * Reverts the last mark when it is the given item's, by deleting its entry and restoring
-     * the progress before it. Does nothing once a later mark has replaced it.
+     * Reverts the last mark when it is the given item's, by taking the item out of its entry
+     * and counting the progress back down. The minutes stay logged. Does nothing once a later
+     * mark has replaced it.
      */
     undoMark: (itemKey: string) => Promise<void>;
     /** True while the last mark belongs to the current item. */
@@ -162,12 +166,9 @@ function sameGame(a: Game, b: Game): boolean {
 /** What Undo needs to revert a mark. */
 interface LastMark {
     itemKey: string;
-    entry: TimelineEntry;
-    previousProgress: RequirementProgress;
-}
-
-function emptyProgress(requirementId: string): RequirementProgress {
-    return { requirementId, counts: {}, minutesSpent: {}, updatedAt: '' };
+    entryId: string;
+    /** Whether the mark raised the count. A mark at the target or on a book in pages does not. */
+    counted: boolean;
 }
 
 /** One material entry, loaded. */
@@ -218,6 +219,13 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
     const [bookState, setBookState] = useState<BookState>({ status: 'loading' });
     const [copies, setCopies] = useState<Map<string, GameKey>>();
     const [entries, setEntries] = useState<TimelineEntry[]>([]);
+    // A queued mark grows the entry the mark before it wrote, and state shows that entry only
+    // after a render.
+    const entriesRef = useRef<TimelineEntry[]>([]);
+    const commitEntries = useCallback((update: (prev: TimelineEntry[]) => TimelineEntry[]) => {
+        entriesRef.current = update(entriesRef.current);
+        setEntries(entriesRef.current);
+    }, []);
     const [historyComplete, setHistoryComplete] = useState(false);
     const [current, setCurrent] = useState<StudyItem>();
     const [loadedGame, setLoadedGame] = useState<{ key: string; game: Game }>();
@@ -360,14 +368,14 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
             return;
         }
         let cancelled = false;
-        setEntries([]);
+        commitEntries(() => []);
         setHistoryComplete(false);
         const load = async () => {
             let startKey: string | undefined;
             do {
                 const resp = await apiRef.current.listUserTimeline(username, startKey);
                 if (cancelled) return;
-                setEntries((prev) => [...prev, ...resp.entries]);
+                commitEntries((prev) => [...prev, ...resp.entries]);
                 startKey = resp.lastEvaluatedKey || undefined;
             } while (startKey);
             setHistoryComplete(true);
@@ -379,7 +387,7 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
         return () => {
             cancelled = true;
         };
-    }, [username, sessionTaskId]);
+    }, [username, sessionTaskId, commitEntries]);
 
     const allItems = useMemo(
         () => (bookState.status === 'ready' ? itemsOf(bookState.book) : []),
@@ -645,15 +653,15 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
             cohort,
             requirement: task,
             progress: freshProgress,
-            timeline: entries,
+            timeline: entriesRef.current,
         });
         return { progress: freshProgress, count };
-    }, [task, cohort, progress, entries, updateUser]);
+    }, [task, cohort, progress, updateUser]);
 
     const postMark = useCallback(
         async (item: StudyItem) => {
             if (!task) throw new Error('No task to mark');
-            const { progress: before, count } = await freshCount();
+            const { progress: fresh, count } = await freshCount();
             // The count rises by one when the item is the unit, never past the target. A book
             // counted in pages records the mark and leaves the count to the member.
             const newCount = countsItems(task, mapping) && count < totalCount ? count + 1 : count;
@@ -661,17 +669,45 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
             // another task.
             const timerOnTask = isTimerOnTask(task.id);
             const minutes = timerOnTask ? Math.floor(timerRef.current.getSeconds() / 60) : 0;
-            const studyInfo = { itemKey: item.key, itemName: item.name };
-            const resp = await apiRef.current.updateUserProgress({
-                cohort,
-                requirementId: task.id,
-                previousCount: count,
-                newCount,
-                incrementalMinutesSpent: minutes,
-                date: null,
-                notes: '',
-                studyInfo,
-            });
+            const now = DateTime.now();
+            const at = now.toUTC().toISO();
+            const mark = { key: item.key, name: item.name, minutes, at };
+            const today = dayEntry(entriesRef.current, task.id, now);
+            let entry: TimelineEntry;
+            if (today) {
+                const edit = editDayEntry(today, {
+                    items: [...today.studyInfo.items, mark],
+                    newCount,
+                    minutes,
+                    task,
+                    cohort,
+                    progress: fresh,
+                    at,
+                });
+                await apiRef.current.updateUserTimeline({
+                    requirementId: task.id,
+                    progress: edit.progress,
+                    updated: [edit.entry],
+                    deleted: [],
+                });
+                entry = edit.entry;
+                commitEntries((prev) => prev.map((e) => (e.id === edit.entry.id ? edit.entry : e)));
+            } else {
+                const resp = await apiRef.current.updateUserProgress({
+                    cohort,
+                    requirementId: task.id,
+                    previousCount: count,
+                    newCount,
+                    incrementalMinutesSpent: minutes,
+                    date: now,
+                    notes: '',
+                    studyInfo: { items: [mark] },
+                });
+                // A backend without the study field answers without it. The hook keeps the mark either way.
+                const created = { ...resp.data.timelineEntry, studyInfo: { items: [mark] } };
+                entry = created;
+                commitEntries((prev) => [created, ...prev]);
+            }
             trackEvent(AnalyticsEvent.UpdateProgress, {
                 requirement_id: task.id,
                 requirement_name: task.name,
@@ -681,21 +717,14 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
                 new_count: newCount,
                 incremental_minutes: minutes,
             });
-            // A backend without the study field answers without it. The hook keeps the mark either way.
-            const entry = { ...resp.data.timelineEntry, studyInfo };
-            setEntries((prev) => [entry, ...prev]);
             if (timerOnTask) {
                 // The seconds this post did not count carry over to the next item.
                 const seconds = Math.max(0, timerRef.current.getSeconds() - minutes * 60);
                 timerRef.current.onRestart(task.id, seconds);
             }
-            rememberMark({
-                itemKey: item.key,
-                entry,
-                previousProgress: before ?? emptyProgress(task.id),
-            });
+            rememberMark({ itemKey: item.key, entryId: entry.id, counted: newCount !== count });
         },
-        [task, cohort, mapping, totalCount, freshCount, isTimerOnTask, rememberMark],
+        [task, cohort, mapping, totalCount, freshCount, isTimerOnTask, commitEntries, rememberMark],
     );
 
     // Marks and undos post absolute counts, so each waits for the one requested before it.
@@ -730,16 +759,31 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
                 // A mark queued behind the click may have become the last one by now.
                 const last = lastMarkRef.current;
                 if (!task || last?.itemKey !== itemKey) return;
+                const entry = entriesRef.current.find((e) => e.id === last.entryId);
+                if (!entry) return;
+                const { progress: fresh } = await freshCount();
+                const items = (entry.studyInfo?.items ?? []).filter((i) => i.key !== itemKey);
+                // The time was still spent, so only the item and its count leave the entry.
+                const newCount = last.counted ? entry.newCount - 1 : entry.newCount;
+                const edit = editDayEntry(entry, {
+                    items,
+                    newCount,
+                    minutes: 0,
+                    task,
+                    cohort,
+                    progress: fresh,
+                    at: DateTime.now().toUTC().toISO(),
+                });
                 await apiRef.current.updateUserTimeline({
                     requirementId: task.id,
-                    progress: last.previousProgress,
-                    updated: [],
-                    deleted: [last.entry],
+                    progress: edit.progress,
+                    updated: [edit.entry],
+                    deleted: [],
                 });
-                setEntries((prev) => prev.filter((entry) => entry.id !== last.entry.id));
+                commitEntries((prev) => prev.map((e) => (e.id === edit.entry.id ? edit.entry : e)));
                 rememberMark(undefined);
             }),
-        [enqueue, task, rememberMark],
+        [enqueue, task, cohort, freshCount, commitEntries, rememberMark],
     );
 
     const setMode = useCallback((item: StudyItem, kind: StudyMode['kind']) => {

@@ -231,7 +231,22 @@ export const memberEntries = [
         id: 'e1',
         requirementId: 'study-1500-1600',
         createdAt: '2026-09-10T00:00:00Z',
-        studyInfo: { itemKey: cohortBook.chapters[4].items[0].key, itemName: 'Game 5' },
+        studyInfo: {
+            items: [
+                {
+                    key: cohortBook.chapters[3].items[0].key,
+                    name: 'Game 4',
+                    minutes: 20,
+                    at: '2026-09-10T00:00:00Z',
+                },
+                {
+                    key: cohortBook.chapters[4].items[0].key,
+                    name: 'Game 5',
+                    minutes: 25,
+                    at: '2026-09-10T00:30:00Z',
+                },
+            ],
+        },
     }),
     entry({ id: 'e2', requirementId: 'folder-task', createdAt: '2026-09-12T00:00:00Z' }),
     entry({ id: 'e3', requirementId: 'unrelated', createdAt: '2026-09-13T00:00:00Z' }),

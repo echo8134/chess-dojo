@@ -61,7 +61,7 @@ export interface TimelineEntry {
     graduationInfo?: TimelineGraduationInfo;
     /** Information on a published game, if this timeline entry is for a published game. */
     gameInfo?: TimelineGameInfo;
-    /** The study item this entry is for, if the study page posted it. */
+    /** The study items this entry covers, if the study page posted or edited it. */
     studyInfo?: TimelineStudyInfo;
     /** The notes the user left on the activity. */
     notes: string;
@@ -95,12 +95,21 @@ export interface TimelineGameInfo {
     headers: Record<string, string>;
 }
 
-/** The study item a progress update is for. */
-export interface TimelineStudyInfo {
+/** One study item marked done in this entry. */
+export interface TimelineStudyItem {
     /** The key of the item within the task's material. */
-    itemKey: string;
+    key: string;
     /** The display name of the item. */
-    itemName: string;
+    name: string;
+    /** The whole minutes the mark counted for this item. */
+    minutes: number;
+    /** When the item was marked, RFC 3339. */
+    at: string;
+}
+
+/** The study items a progress entry covers, when the study page posted or edited it. */
+export interface TimelineStudyInfo {
+    items: TimelineStudyItem[];
 }
 
 /** A reaction on a timeline entry. */

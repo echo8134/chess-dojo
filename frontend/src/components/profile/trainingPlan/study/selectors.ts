@@ -1,7 +1,14 @@
 import { GameKey } from '@/database/game';
-import { CustomTask, isRequirement, Requirement } from '@/database/requirement';
-import { TimelineEntry } from '@/database/timeline';
+import {
+    CustomTask,
+    getCurrentScore,
+    isRequirement,
+    Requirement,
+    RequirementProgress,
+} from '@/database/requirement';
+import { TimelineEntry, TimelineStudyInfo, TimelineStudyItem } from '@/database/timeline';
 import { ALL_COHORTS, compareCohorts, dojoCohorts, User } from '@/database/user';
+import { DateTime } from 'luxon';
 import { StudyItem } from './book';
 
 /** Select the task's cohort using the same rules as the task dialog. */
@@ -52,11 +59,108 @@ export function singularUnit(unit: string): string {
 export function doneKeys(entries: TimelineEntry[], taskId: string): Set<string> {
     const keys = new Set<string>();
     for (const entry of entries) {
-        if (entry.requirementId === taskId && entry.studyInfo?.itemKey) {
-            keys.add(entry.studyInfo.itemKey);
+        if (entry.requirementId !== taskId) continue;
+        for (const item of entry.studyInfo?.items ?? []) {
+            keys.add(item.key);
         }
     }
     return keys;
+}
+
+/** A progress entry with at least one item the study page marked in it. */
+export type StudyEntry = TimelineEntry & { studyInfo: TimelineStudyInfo };
+
+export function isStudyEntry(entry: TimelineEntry): entry is StudyEntry {
+    return (entry.studyInfo?.items?.length ?? 0) > 0;
+}
+
+/**
+ * The entry a mark today grows. It is the latest created of this task's entries with items,
+ * dated on the same local calendar day as now. The list's order does not count. The server sorts
+ * a day's entries by id, which is random within the day.
+ */
+export function dayEntry(
+    entries: TimelineEntry[],
+    taskId: string,
+    now: DateTime,
+): StudyEntry | undefined {
+    let latest: StudyEntry | undefined;
+    for (const entry of entries) {
+        if (
+            entry.requirementId === taskId &&
+            isStudyEntry(entry) &&
+            DateTime.fromISO(entry.date || entry.createdAt).hasSame(now, 'day') &&
+            (!latest || entry.createdAt > latest.createdAt)
+        ) {
+            latest = entry;
+        }
+    }
+    return latest;
+}
+
+/** The key the task's count lives under, as getCurrentCount and the progress handler read it. */
+function countKey(task: Requirement | CustomTask, cohort: string): string {
+    return task.numberOfCohorts === 0 || task.numberOfCohorts === 1 ? ALL_COHORTS : cohort;
+}
+
+export interface DayEdit {
+    entry: TimelineEntry;
+    progress: RequirementProgress;
+}
+
+/**
+ * The day's entry and the task's progress after its items change. Points follow the server's
+ * rule, the score at the new count less the score at the entry's previous count. A custom task
+ * scores nothing. An entry with no items left is time only and drops its study info.
+ */
+export function editDayEntry(
+    entry: TimelineEntry,
+    change: {
+        items: TimelineStudyItem[];
+        newCount: number;
+        /** The minutes the change adds to the entry and to the progress. */
+        minutes: number;
+        task: Requirement | CustomTask;
+        cohort: string;
+        progress: RequirementProgress | undefined;
+        /** When the change happened, RFC 3339. */
+        at: string;
+    },
+): DayEdit {
+    const { items, newCount, minutes, task, cohort, at } = change;
+    const key = countKey(task, cohort);
+    const base: RequirementProgress = {
+        requirementId: task.id,
+        minutesSpent: {},
+        updatedAt: '',
+        ...change.progress,
+    };
+    const score = (count: number) =>
+        isRequirement(task)
+            ? getCurrentScore(cohort, task, { ...base, counts: { ...base.counts, [key]: count } })
+            : 0;
+    const edited: TimelineEntry = {
+        ...entry,
+        newCount,
+        dojoPoints: score(newCount) - score(entry.previousCount),
+        totalDojoPoints: score(newCount),
+        minutesSpent: entry.minutesSpent + minutes,
+        totalMinutesSpent: entry.totalMinutesSpent + minutes,
+        studyInfo: { items },
+    };
+    if (items.length === 0) delete edited.studyInfo;
+    return {
+        entry: edited,
+        progress: {
+            ...base,
+            counts: { ...base.counts, [key]: newCount },
+            minutesSpent: {
+                ...base.minutesSpent,
+                [cohort]: (base.minutesSpent[cohort] ?? 0) + minutes,
+            },
+            updatedAt: at,
+        },
+    };
 }
 
 /**

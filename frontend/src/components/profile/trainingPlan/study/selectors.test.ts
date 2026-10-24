@@ -7,14 +7,17 @@ import {
 } from '@/database/requirement';
 import { TimelineEntry } from '@/database/timeline';
 import { ALL_COHORTS, User } from '@/database/user';
-import { describe, expect, it } from 'vitest';
+import { DateTime, Settings } from 'luxon';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { StudyItem } from './book';
 import {
     bookMapping,
     chooseCurrent,
     cohortSlice,
     countsItems,
+    dayEntry,
     doneKeys,
+    editDayEntry,
     isWorkbook,
     pointerDone,
     presetMode,
@@ -89,16 +92,22 @@ describe('chooseCurrent', () => {
     });
 });
 
+const studied = (key: string, minutes = 0, at = '2026-10-24T18:00:00.000Z') => ({
+    key,
+    name: key.toUpperCase(),
+    minutes,
+    at,
+});
+
 describe('doneKeys', () => {
-    it("collects item keys only from this task's entries that carry studyInfo", () => {
+    it("collects the items of this task's entries, once each", () => {
         const entries = [
-            { requirementId: 't', studyInfo: { itemKey: 'k1', itemName: 'One' } },
-            { requirementId: 't', studyInfo: { itemKey: 'k1', itemName: 'One' } },
+            { requirementId: 't', studyInfo: { items: [studied('k1'), studied('k2')] } },
             { requirementId: 't' },
-            { requirementId: 'other', studyInfo: { itemKey: 'k2', itemName: 'Two' } },
-            { requirementId: 't', studyInfo: { itemKey: 'k3', itemName: 'Three' } },
+            { requirementId: 'other', studyInfo: { items: [studied('k4')] } },
+            { requirementId: 't', studyInfo: { items: [studied('k2'), studied('k3')] } },
         ] as TimelineEntry[];
-        expect([...doneKeys(entries, 't')].sort()).toEqual(['k1', 'k3']);
+        expect([...doneKeys(entries, 't')].sort()).toEqual(['k1', 'k2', 'k3']);
     });
 });
 
@@ -290,6 +299,187 @@ describe('countsItems', () => {
         expect(countsItems(logicalChess, bookMapping(logicalChess, 79))).toBe(false);
         expect(countsItems(silmanPart2, bookMapping(silmanPart2, 49))).toBe(false);
         expect(countsItems(polgarM2, bookMapping(polgarM2, 100))).toBe(false);
+    });
+});
+
+describe('dayEntry on the same local calendar day', () => {
+    // New York is four hours behind UTC in late October. 23:30 there on the 24th is 03:30Z on
+    // the 25th, so a UTC string's calendar date is not the local one.
+    beforeEach(() => {
+        Settings.defaultZone = 'America/New_York';
+    });
+    afterEach(() => {
+        Settings.defaultZone = 'system';
+    });
+    const now = DateTime.fromISO('2026-10-24T23:30:00', { zone: 'America/New_York' });
+    const entry = (id: string, date: string, overrides: Partial<TimelineEntry> = {}) =>
+        ({
+            id,
+            requirementId: 't',
+            date,
+            createdAt: date,
+            studyInfo: { items: [studied('k1')] },
+            ...overrides,
+        }) as TimelineEntry;
+    const tonight = entry('e3', '2026-10-25T03:00:00Z');
+    const thisMorning = entry('e2', '2026-10-24T13:01:00+09:00');
+    const lastNight = entry('e1', '2026-10-24T03:59:00Z');
+
+    it('picks the newest entry of the task with items, skipping other tasks and time-only entries', () => {
+        const entries = [
+            entry('e5', '2026-10-25T03:20:00Z', { requirementId: 'other' }),
+            entry('e4', '2026-10-25T03:10:00Z', { studyInfo: undefined }),
+            tonight,
+            thisMorning,
+            lastNight,
+        ];
+        expect(dayEntry(entries, 't', now)?.id).toBe('e3');
+        expect(dayEntry([thisMorning, lastNight], 't', now)?.id).toBe('e2');
+    });
+
+    it('picks the latest created entry whatever the order of the list', () => {
+        expect(dayEntry([thisMorning, tonight], 't', now)?.id).toBe('e3');
+        expect(dayEntry([tonight, thisMorning], 't', now)?.id).toBe('e3');
+    });
+
+    it('is undefined when today has no entry with items', () => {
+        expect(dayEntry([lastNight], 't', now)).toBeUndefined();
+        expect(dayEntry([entry('e6', '2026-10-25T04:01:00Z')], 't', now)).toBeUndefined();
+        expect(
+            dayEntry([entry('e7', '2026-10-25T03:00:00Z', { studyInfo: { items: [] } })], 't', now),
+        ).toBeUndefined();
+    });
+
+    it('falls back to createdAt when the entry has no date', () => {
+        expect(dayEntry([entry('e8', '2026-10-25T03:00:00Z', { date: '' })], 't', now)?.id).toBe(
+            'e8',
+        );
+    });
+});
+
+describe('editDayEntry', () => {
+    const at = '2026-10-24T18:30:00.000Z';
+    const entry = {
+        owner: 'student',
+        id: '2026-10-24_e1',
+        requirementId: 'r',
+        cohort: '1000-1100',
+        previousCount: 310,
+        newCount: 311,
+        dojoPoints: 1,
+        totalDojoPoints: 5,
+        minutesSpent: 7,
+        totalMinutesSpent: 37,
+        studyInfo: { items: [studied('k1', 7)] },
+    } as TimelineEntry;
+    const progress = {
+        requirementId: 'r',
+        counts: { ALL_COHORTS: 311 },
+        minutesSpent: { '1000-1100': 37 },
+        updatedAt: '2026-10-24T18:00:00.000Z',
+    };
+
+    it('adds an item and its minutes and scores the count against the entry start', () => {
+        const edit = editDayEntry(entry, {
+            items: [studied('k1', 7), studied('k2', 5, at)],
+            newCount: 312,
+            minutes: 5,
+            task: polgarM2,
+            cohort: '1000-1100',
+            progress,
+            at,
+        });
+        expect(edit.entry).toEqual({
+            owner: 'student',
+            id: '2026-10-24_e1',
+            requirementId: 'r',
+            cohort: '1000-1100',
+            previousCount: 310,
+            newCount: 312,
+            dojoPoints: 2,
+            totalDojoPoints: 6,
+            minutesSpent: 12,
+            totalMinutesSpent: 42,
+            studyInfo: { items: [studied('k1', 7), studied('k2', 5, at)] },
+        });
+        expect(edit.progress).toEqual({
+            requirementId: 'r',
+            counts: { ALL_COHORTS: 312 },
+            minutesSpent: { '1000-1100': 42 },
+            updatedAt: at,
+        });
+    });
+
+    it('drops the study info when the last item leaves and keeps the minutes', () => {
+        const edit = editDayEntry(entry, {
+            items: [],
+            newCount: 310,
+            minutes: 0,
+            task: polgarM2,
+            cohort: '1000-1100',
+            progress,
+            at,
+        });
+        expect(edit.entry).toEqual({
+            owner: 'student',
+            id: '2026-10-24_e1',
+            requirementId: 'r',
+            cohort: '1000-1100',
+            previousCount: 310,
+            newCount: 310,
+            dojoPoints: 0,
+            totalDojoPoints: 4,
+            minutesSpent: 7,
+            totalMinutesSpent: 37,
+        });
+        expect(edit.entry).not.toHaveProperty('studyInfo');
+        expect(edit.progress).toEqual({
+            requirementId: 'r',
+            counts: { ALL_COHORTS: 310 },
+            minutesSpent: { '1000-1100': 37 },
+            updatedAt: at,
+        });
+    });
+
+    it('keys a per-cohort task by its cohort, and gives a custom task no points', () => {
+        const perCohort = editDayEntry(entry, {
+            items: [studied('k1', 7)],
+            newCount: 312,
+            minutes: 0,
+            task: requirement({ ...polgarM2, numberOfCohorts: -1 }),
+            cohort: '1000-1100',
+            progress: {
+                requirementId: 'r',
+                counts: { '1000-1100': 311 },
+                minutesSpent: {},
+                updatedAt: '',
+            },
+            at,
+        });
+        expect(perCohort.progress.counts).toEqual({ '1000-1100': 312 });
+        expect(perCohort.entry).toMatchObject({ dojoPoints: 2, totalDojoPoints: 6 });
+
+        const custom = editDayEntry(entry, {
+            items: [studied('k1', 7)],
+            newCount: 4,
+            minutes: 3,
+            task: customTask,
+            cohort: '1000-1100',
+            progress: undefined,
+            at,
+        });
+        expect(custom.entry).toMatchObject({
+            dojoPoints: 0,
+            totalDojoPoints: 0,
+            minutesSpent: 10,
+            totalMinutesSpent: 40,
+        });
+        expect(custom.progress).toEqual({
+            requirementId: 'c',
+            counts: { ALL_COHORTS: 4 },
+            minutesSpent: { '1000-1100': 3 },
+            updatedAt: at,
+        });
     });
 });
 

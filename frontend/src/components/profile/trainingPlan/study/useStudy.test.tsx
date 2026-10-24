@@ -13,6 +13,7 @@ import {
 import { TimelineEntry } from '@/database/timeline';
 import { Chess } from '@jackstenglein/chess';
 import { act, renderHook, waitFor } from '@testing-library/react';
+import { DateTime, Settings } from 'luxon';
 import { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { itemsOf } from './book';
@@ -23,6 +24,11 @@ const PGN_A = '[Event "A"]\n[White "Keres"]\n[Black "Smyslov"]\n[Result "*"]\n\n
 const PGN_B = '[Event "B"]\n[White "Tal"]\n[Black "Botvinnik"]\n[Result "*"]\n\n*';
 const KEY_A = 'course:STUDY/study-1/m1/0';
 const KEY_B = 'course:STUDY/study-1/m2/0';
+/** 18:00 UTC on the 24th. The hook reads the clock through luxon, so Settings pins it. */
+const NOW_ISO = '2026-10-24T18:00:00.000Z';
+const NOW = DateTime.fromISO(NOW_ISO, { zone: 'utc' });
+/** An item as a loaded entry carries it, named by its key, with no minutes. */
+const studied = (key: string) => ({ key, name: key, minutes: 0, at: NOW_ISO });
 
 const course = {
     type: CourseType.Study,
@@ -277,16 +283,21 @@ beforeEach(() => {
     );
     mocks.api.listGamesByOwner.mockResolvedValue({ data: { games: [] } });
     mocks.api.listUserTimeline.mockResolvedValue({ entries: [], lastEvaluatedKey: '' });
+    mocks.api.updateUserTimeline.mockResolvedValue({ data: mocks.user });
     (timer.onStart as ReturnType<typeof vi.fn>).mockReset();
     (timer.onClear as ReturnType<typeof vi.fn>).mockReset();
     (timer.onRestart as ReturnType<typeof vi.fn>).mockReset();
     timerSeconds = 0;
     timer.task = undefined;
     mocks.freshApi = false;
+    Settings.now = () => NOW.toMillis();
+    Settings.defaultZone = 'utc';
 });
 
 afterEach(() => {
     vi.restoreAllMocks();
+    Settings.now = () => Date.now();
+    Settings.defaultZone = 'system';
 });
 
 describe('useStudy: book, current item and done marks', () => {
@@ -306,7 +317,7 @@ describe('useStudy: book, current item and done marks', () => {
     it('opens on the first item not yet marked done', async () => {
         const entry = {
             requirementId: 'task-1',
-            studyInfo: { itemKey: KEY_A, itemName: KEY_A },
+            studyInfo: { items: [studied(KEY_A)] },
         } as TimelineEntry;
         mocks.api.listUserTimeline.mockResolvedValue({ entries: [entry], lastEvaluatedKey: '' });
         const { study } = await ready();
@@ -413,7 +424,7 @@ describe('useStudy: book, current item and done marks', () => {
 
     it('collects done marks across timeline pages and from a new entry at once', async () => {
         const entry = (key: string, requirementId = 'task-1') =>
-            ({ requirementId, studyInfo: { itemKey: key, itemName: key } }) as TimelineEntry;
+            ({ requirementId, studyInfo: { items: [studied(key)] } }) as TimelineEntry;
         mocks.api.listUserTimeline
             .mockResolvedValueOnce({ entries: [entry(KEY_A)], lastEvaluatedKey: 'page-2' })
             .mockResolvedValueOnce({ entries: [entry(KEY_B, 'other')], lastEvaluatedKey: '' });
@@ -852,7 +863,7 @@ describe('useStudy: a workbook read as one book, sliced to the cohort', () => {
             entries: [
                 {
                     requirementId: 'polgar',
-                    studyInfo: { itemKey: problem12, itemName: 'Problem 12' },
+                    studyInfo: { items: [studied(problem12)] },
                 } as TimelineEntry,
             ],
             lastEvaluatedKey: '',
@@ -1077,30 +1088,60 @@ describe('useStudy: the PGN a remounted board loads', () => {
 });
 
 describe('useStudy: marking an item without the dialog', () => {
-    const progressAt = (count: number, requirementId = 'polgar') => ({
+    const progressAt = (count: number, requirementId = 'polgar', minutes = 30) => ({
         requirementId,
         counts: { ALL_COHORTS: count },
-        minutesSpent: { '1500-1600': 30 },
+        minutesSpent: { '1500-1600': minutes },
         updatedAt: '',
     });
-    /** Answers like the deployed backend, which drops studyInfo from the entry. */
+    /**
+     * Answers like the deployed backend, which drops studyInfo from the entry. The points are
+     * Polgar's, one per exercise past its start of 6.
+     */
     const answer = (posted: UpdateUserProgressRequest) =>
         Promise.resolve({
             data: {
                 user: {
                     ...mocks.user,
                     progress: {
-                        [posted.requirementId]: progressAt(posted.newCount, posted.requirementId),
+                        [posted.requirementId]: progressAt(
+                            posted.newCount,
+                            posted.requirementId,
+                            30 + posted.incrementalMinutesSpent,
+                        ),
                     },
                 },
                 timelineEntry: {
+                    owner: 'student',
                     id: 'entry-1',
                     requirementId: posted.requirementId,
+                    cohort: posted.cohort,
                     previousCount: posted.previousCount,
                     newCount: posted.newCount,
+                    dojoPoints: posted.newCount - posted.previousCount,
+                    totalDojoPoints: posted.newCount - 6,
+                    minutesSpent: posted.incrementalMinutesSpent,
+                    totalMinutesSpent: 30 + posted.incrementalMinutesSpent,
+                    date: posted.date?.toUTC().toISO(),
+                    createdAt: NOW_ISO,
                 },
             },
         });
+    /** A server whose stored progress follows every write and is read back by the next mark. */
+    const liveServer = (count = 10) => {
+        let stored: RequirementProgress = progressAt(count);
+        mocks.api.getUser.mockImplementation(() =>
+            Promise.resolve({ data: { ...mocks.user, progress: { polgar: stored } } }),
+        );
+        mocks.api.updateUserProgress.mockImplementation((posted: UpdateUserProgressRequest) => {
+            stored = progressAt(posted.newCount, 'polgar', 30 + posted.incrementalMinutesSpent);
+            return answer(posted);
+        });
+        mocks.api.updateUserTimeline.mockImplementation((req: UpdateUserTimelineRequest) => {
+            stored = req.progress;
+            return Promise.resolve({ data: { ...mocks.user, progress: { polgar: req.progress } } });
+        });
+    };
 
     it('posts one count up with the mark and the timer minutes, and keeps the mark', async () => {
         mocks.user = { ...mocks.user, timerTaskId: 'polgar' };
@@ -1114,15 +1155,16 @@ describe('useStudy: marking an item without the dialog', () => {
 
         await act(() => study().session?.markItemDone(item));
         expect(mocks.updateUser).toHaveBeenCalledWith(fresh);
-        expect(mocks.api.updateUserProgress).toHaveBeenCalledWith({
+        const [posted] = mocks.api.updateUserProgress.mock.calls[0] as [UpdateUserProgressRequest];
+        expect({ ...posted, date: posted.date?.toUTC().toISO() }).toEqual({
             cohort: '1500-1600',
             requirementId: 'polgar',
             previousCount: 10,
             newCount: 11,
             incrementalMinutesSpent: 7,
-            date: null,
+            date: NOW_ISO,
             notes: '',
-            studyInfo: { itemKey: item.key, itemName: item.name },
+            studyInfo: { items: [{ key: item.key, name: item.name, minutes: 7, at: NOW_ISO }] },
         });
         expect(study().session?.done.has(item.key)).toBe(true);
         expect(study().session?.canUndo).toBe(true);
@@ -1140,18 +1182,141 @@ describe('useStudy: marking an item without the dialog', () => {
         });
     });
 
-    it('posts a second mark only after the first, on the count the first one wrote', async () => {
-        let stored = progressAt(10);
+    it('grows the day entry with a second mark, posting the edited entry and progress', async () => {
+        mocks.user = { ...mocks.user, timerTaskId: 'polgar' };
+        liveServer();
+        timerSeconds = 7 * 60;
+        const { study } = await ready(null, POLGAR_SOURCE);
+        const [first, second] = study().book.chapters[0].items;
+        await act(() => study().session?.markItemDone(first));
+        timerSeconds = 5 * 60 + 30;
+        await act(() => study().session?.markItemDone(second));
+
+        expect(mocks.api.updateUserProgress).toHaveBeenCalledTimes(1);
+        expect(mocks.api.updateUserTimeline).toHaveBeenCalledTimes(1);
+        expect(mocks.api.updateUserTimeline).toHaveBeenCalledWith({
+            requirementId: 'polgar',
+            progress: {
+                requirementId: 'polgar',
+                counts: { ALL_COHORTS: 12 },
+                minutesSpent: { '1500-1600': 42 },
+                updatedAt: NOW_ISO,
+            },
+            updated: [
+                {
+                    owner: 'student',
+                    id: 'entry-1',
+                    requirementId: 'polgar',
+                    cohort: '1500-1600',
+                    previousCount: 10,
+                    newCount: 12,
+                    dojoPoints: 2,
+                    totalDojoPoints: 6,
+                    minutesSpent: 12,
+                    totalMinutesSpent: 42,
+                    date: NOW_ISO,
+                    createdAt: NOW_ISO,
+                    studyInfo: {
+                        items: [
+                            { key: first.key, name: first.name, minutes: 7, at: NOW_ISO },
+                            { key: second.key, name: second.name, minutes: 5, at: NOW_ISO },
+                        ],
+                    },
+                },
+            ],
+            deleted: [],
+        });
+        expect(study().session?.done.has(first.key)).toBe(true);
+        expect(study().session?.done.has(second.key)).toBe(true);
+        expect(timer.onRestart).toHaveBeenLastCalledWith('polgar', 30);
+        expect(mocks.trackEvent).toHaveBeenCalledTimes(2);
+    });
+
+    it('grows an entry loaded for today from an earlier sitting', async () => {
+        mocks.user = { ...mocks.user, progress: { polgar: progressAt(10) } };
+        liveServer();
+        const problem7 = 'course:STUDY/p1/p1-m0/0';
+        const earlier = '2026-10-24T16:00:00.000Z';
+        const loaded = {
+            owner: 'student',
+            id: 'entry-0',
+            requirementId: 'polgar',
+            cohort: '1500-1600',
+            previousCount: 9,
+            newCount: 10,
+            dojoPoints: 1,
+            totalDojoPoints: 4,
+            minutesSpent: 20,
+            totalMinutesSpent: 30,
+            date: earlier,
+            createdAt: earlier,
+            studyInfo: { items: [{ key: problem7, name: 'Problem 7', minutes: 20, at: earlier }] },
+        } as TimelineEntry;
+        mocks.api.listUserTimeline.mockResolvedValue({ entries: [loaded], lastEvaluatedKey: '' });
+        const { study } = await ready(null, POLGAR_SOURCE);
+        const item = study().current;
+        expect(item.name).toBe('Problem 11');
+
+        await act(() => study().session?.markItemDone(item));
+        expect(mocks.api.updateUserProgress).not.toHaveBeenCalled();
+        expect(mocks.api.updateUserTimeline).toHaveBeenCalledTimes(1);
+        expect(mocks.api.updateUserTimeline.mock.calls[0][0]).toMatchObject({
+            progress: {
+                counts: { ALL_COHORTS: 11 },
+                minutesSpent: { '1500-1600': 30 },
+                updatedAt: NOW_ISO,
+            },
+            updated: [
+                {
+                    id: 'entry-0',
+                    previousCount: 9,
+                    newCount: 11,
+                    dojoPoints: 2,
+                    totalDojoPoints: 5,
+                    minutesSpent: 20,
+                    totalMinutesSpent: 30,
+                    studyInfo: {
+                        items: [
+                            { key: problem7, minutes: 20 },
+                            { key: item.key, name: item.name, minutes: 0, at: NOW_ISO },
+                        ],
+                    },
+                },
+            ],
+        });
+        expect(study().session?.done.has(item.key)).toBe(true);
+    });
+
+    it('starts a new entry on a new day', async () => {
+        liveServer();
+        const { study } = await ready(null, POLGAR_SOURCE);
+        const [first, second] = study().book.chapters[0].items;
+        await act(() => study().session?.markItemDone(first));
+        Settings.now = () => NOW.plus({ days: 1 }).toMillis();
+        await act(() => study().session?.markItemDone(second));
+
+        expect(mocks.api.updateUserTimeline).not.toHaveBeenCalled();
+        expect(mocks.api.updateUserProgress).toHaveBeenCalledTimes(2);
+        const [, [next]] = mocks.api.updateUserProgress.mock.calls as [UpdateUserProgressRequest][];
+        expect(next).toMatchObject({
+            previousCount: 11,
+            newCount: 12,
+            studyInfo: {
+                items: [{ key: second.key, minutes: 0, at: '2026-10-25T18:00:00.000Z' }],
+            },
+        });
+        expect(next.date?.toUTC().toISO()).toBe('2026-10-25T18:00:00.000Z');
+    });
+
+    it('posts a second mark only after the first, growing the entry the first one wrote', async () => {
+        let stored: RequirementProgress = progressAt(10);
         mocks.api.getUser.mockImplementation(() =>
             Promise.resolve({ data: { ...mocks.user, progress: { polgar: stored } } }),
         );
         const release = deferred<undefined>();
         mocks.api.updateUserProgress.mockImplementation((posted: UpdateUserProgressRequest) => {
             stored = progressAt(posted.newCount);
-            const response = answer(posted);
-            return mocks.api.updateUserProgress.mock.calls.length === 1
-                ? release.promise.then(() => response)
-                : response;
+            return release.promise.then(() => answer(posted));
         });
         const { study } = await ready(null, POLGAR_SOURCE);
         const [first, second] = study().book.chapters[0].items;
@@ -1164,21 +1329,28 @@ describe('useStudy: marking an item without the dialog', () => {
         });
         await waitFor(() => expect(mocks.api.updateUserProgress).toHaveBeenCalledTimes(1));
         expect(mocks.api.updateUserProgress.mock.calls[0][0]).toMatchObject({
-            studyInfo: { itemKey: first.key },
+            studyInfo: { items: [{ key: first.key }] },
             previousCount: 10,
             newCount: 11,
         });
         await act(() => Promise.resolve());
-        expect(mocks.api.updateUserProgress).toHaveBeenCalledTimes(1);
+        expect(mocks.api.updateUserTimeline).not.toHaveBeenCalled();
         expect(secondSettled).toBe(false);
 
         act(() => release.resolve(undefined));
         await waitFor(() => expect(secondSettled).toBe(true));
-        expect(mocks.api.updateUserProgress).toHaveBeenCalledTimes(2);
-        expect(mocks.api.updateUserProgress.mock.calls[1][0]).toMatchObject({
-            studyInfo: { itemKey: second.key },
-            previousCount: 11,
-            newCount: 12,
+        expect(mocks.api.updateUserProgress).toHaveBeenCalledTimes(1);
+        expect(mocks.api.updateUserTimeline).toHaveBeenCalledTimes(1);
+        expect(mocks.api.updateUserTimeline.mock.calls[0][0]).toMatchObject({
+            progress: { counts: { ALL_COHORTS: 12 } },
+            updated: [
+                {
+                    id: 'entry-1',
+                    previousCount: 10,
+                    newCount: 12,
+                    studyInfo: { items: [{ key: first.key }, { key: second.key }] },
+                },
+            ],
         });
         expect(study().session?.done.has(first.key)).toBe(true);
         expect(study().session?.done.has(second.key)).toBe(true);
@@ -1236,10 +1408,19 @@ describe('useStudy: marking an item without the dialog', () => {
         await waitFor(() => expect(mocks.api.getUser).toHaveBeenCalledTimes(2));
         act(() => refresh.resolve(undefined));
         await waitFor(() => expect(secondSettled).toBe(true));
-        const minutes = mocks.api.updateUserProgress.mock.calls.map(
-            ([posted]) => (posted as UpdateUserProgressRequest).incrementalMinutesSpent,
-        );
-        expect(minutes).toEqual([10, 0]);
+        expect(mocks.api.updateUserProgress).toHaveBeenCalledTimes(1);
+        expect(mocks.api.updateUserProgress.mock.calls[0][0]).toMatchObject({
+            incrementalMinutesSpent: 10,
+        });
+        expect(mocks.api.updateUserTimeline.mock.calls[0][0]).toMatchObject({
+            updated: [
+                {
+                    minutesSpent: 10,
+                    totalMinutesSpent: 40,
+                    studyInfo: { items: [{ minutes: 10 }, { minutes: 0 }] },
+                },
+            ],
+        });
     });
 
     it('counts no minutes and leaves the timer alone when it runs on another task', async () => {
@@ -1293,7 +1474,7 @@ describe('useStudy: marking an item without the dialog', () => {
             requirementId: 'silman',
             previousCount: 40,
             newCount: 40,
-            studyInfo: { itemKey: item.key, itemName: item.name },
+            studyInfo: { items: [{ key: item.key, name: item.name, minutes: 0, at: NOW_ISO }] },
         });
         expect(study().session?.done.has(item.key)).toBe(true);
         expect(study().session?.canUndo).toBe(true);
@@ -1311,38 +1492,131 @@ describe('useStudy: marking an item without the dialog', () => {
             requirementId: 'silman1',
             previousCount: 4,
             newCount: 4,
-            studyInfo: { itemKey: item.key, itemName: item.name },
+            studyInfo: { items: [{ key: item.key, name: item.name, minutes: 0, at: NOW_ISO }] },
         });
         expect(study().session?.done.has(item.key)).toBe(true);
     });
 
-    it('undoes the last mark by deleting its entry with the progress from before', async () => {
-        const fresh = { ...mocks.user, progress: { polgar: progressAt(10) } };
-        mocks.api.getUser.mockResolvedValue({ data: fresh });
-        mocks.api.updateUserProgress.mockImplementation(answer);
-        mocks.api.updateUserTimeline.mockResolvedValue({ data: fresh });
+    it('undoes the only mark of the day into a time-only entry, keeping its minutes', async () => {
+        mocks.user = { ...mocks.user, timerTaskId: 'polgar' };
+        liveServer();
+        timerSeconds = 7 * 60;
         const { study } = await ready(null, POLGAR_SOURCE);
         const item = study().current;
         await act(() => study().session?.markItemDone(item));
         expect(study().session?.done.has(item.key)).toBe(true);
+        (timer.onRestart as ReturnType<typeof vi.fn>).mockReset();
 
         await act(() => study().session?.undoMark(item.key));
+        expect(mocks.api.updateUserTimeline).toHaveBeenCalledTimes(1);
         expect(mocks.api.updateUserTimeline).toHaveBeenCalledWith({
             requirementId: 'polgar',
-            progress: progressAt(10),
-            updated: [],
-            deleted: [
+            progress: {
+                requirementId: 'polgar',
+                counts: { ALL_COHORTS: 10 },
+                minutesSpent: { '1500-1600': 37 },
+                updatedAt: NOW_ISO,
+            },
+            updated: [
                 {
+                    owner: 'student',
                     id: 'entry-1',
                     requirementId: 'polgar',
+                    cohort: '1500-1600',
+                    previousCount: 10,
+                    newCount: 10,
+                    dojoPoints: 0,
+                    totalDojoPoints: 4,
+                    minutesSpent: 7,
+                    totalMinutesSpent: 37,
+                    date: NOW_ISO,
+                    createdAt: NOW_ISO,
+                },
+            ],
+            deleted: [],
+        });
+        const [undo] = mocks.api.updateUserTimeline.mock.calls[0] as [UpdateUserTimelineRequest];
+        expect(undo.updated[0]).not.toHaveProperty('studyInfo');
+        expect(timer.onRestart).not.toHaveBeenCalled();
+        expect(timer.onClear).not.toHaveBeenCalled();
+        expect(study().session?.done.has(item.key)).toBe(false);
+        expect(study().session?.canUndo).toBe(false);
+    });
+
+    it('undoes the second mark out of the entry, counting down and keeping both minutes', async () => {
+        mocks.user = { ...mocks.user, timerTaskId: 'polgar' };
+        liveServer();
+        timerSeconds = 7 * 60;
+        const { study } = await ready(null, POLGAR_SOURCE);
+        const [first, second] = study().book.chapters[0].items;
+        await act(() => study().session?.markItemDone(first));
+        timerSeconds = 5 * 60;
+        await act(() => study().session?.markItemDone(second));
+        (timer.onRestart as ReturnType<typeof vi.fn>).mockReset();
+
+        await act(() => study().session?.undoMark(second.key));
+        expect(mocks.api.updateUserTimeline).toHaveBeenCalledTimes(2);
+        expect(mocks.api.updateUserTimeline).toHaveBeenLastCalledWith({
+            requirementId: 'polgar',
+            progress: {
+                requirementId: 'polgar',
+                counts: { ALL_COHORTS: 11 },
+                minutesSpent: { '1500-1600': 42 },
+                updatedAt: NOW_ISO,
+            },
+            updated: [
+                {
+                    owner: 'student',
+                    id: 'entry-1',
+                    requirementId: 'polgar',
+                    cohort: '1500-1600',
                     previousCount: 10,
                     newCount: 11,
-                    studyInfo: { itemKey: item.key, itemName: item.name },
+                    dojoPoints: 1,
+                    totalDojoPoints: 5,
+                    minutesSpent: 12,
+                    totalMinutesSpent: 42,
+                    date: NOW_ISO,
+                    createdAt: NOW_ISO,
+                    studyInfo: {
+                        items: [{ key: first.key, name: first.name, minutes: 7, at: NOW_ISO }],
+                    },
+                },
+            ],
+            deleted: [],
+        });
+        expect(timer.onRestart).not.toHaveBeenCalled();
+        expect(timer.onClear).not.toHaveBeenCalled();
+        expect(study().session?.done.has(first.key)).toBe(true);
+        expect(study().session?.done.has(second.key)).toBe(false);
+        expect(study().session?.canUndo).toBe(false);
+    });
+
+    it('leaves the count alone when undoing a mark that hit the target', async () => {
+        mocks.user = { ...mocks.user, progress: { polgar: progressAt(10) } };
+        liveServer(11);
+        const { study } = await ready(null, POLGAR_SOURCE);
+        const [eleven, twelve] = study().book.chapters[0].items.slice(4);
+        expect([eleven.name, twelve.name]).toEqual(['Problem 11', 'Problem 12']);
+        await act(() => study().session?.markItemDone(eleven));
+        await act(() => study().session?.markItemDone(twelve));
+        expect(mocks.api.updateUserTimeline.mock.calls[0][0]).toMatchObject({
+            updated: [{ previousCount: 11, newCount: 12 }],
+        });
+
+        await act(() => study().session?.undoMark(twelve.key));
+        expect(mocks.api.updateUserTimeline.mock.calls[1][0]).toMatchObject({
+            progress: { counts: { ALL_COHORTS: 12 } },
+            updated: [
+                {
+                    previousCount: 11,
+                    newCount: 12,
+                    dojoPoints: 1,
+                    totalDojoPoints: 6,
+                    studyInfo: { items: [{ key: eleven.key }] },
                 },
             ],
         });
-        expect(study().session?.done.has(item.key)).toBe(false);
-        expect(study().session?.canUndo).toBe(false);
     });
 
     it('offers undo only on the item that was marked last', async () => {
@@ -1387,7 +1661,7 @@ describe('useStudy: marking an item without the dialog', () => {
         expect(mocks.api.updateUserProgress).toHaveBeenCalledTimes(1);
     });
 
-    it('runs an undo asked during a mark after it, against the progress that mark replaced', async () => {
+    it('runs an undo asked during a mark after it, against the entry that mark created', async () => {
         const fresh = { ...mocks.user, progress: { polgar: progressAt(10) } };
         mocks.api.getUser.mockResolvedValue({ data: fresh });
         const release = deferred<undefined>();
@@ -1415,33 +1689,42 @@ describe('useStudy: marking an item without the dialog', () => {
         await waitFor(() => expect(undone).toBe(true));
         expect(mocks.api.updateUserTimeline).toHaveBeenCalledWith({
             requirementId: 'polgar',
-            progress: progressAt(10),
-            updated: [],
-            deleted: [
+            progress: {
+                requirementId: 'polgar',
+                counts: { ALL_COHORTS: 10 },
+                minutesSpent: { '1500-1600': 30 },
+                updatedAt: NOW_ISO,
+            },
+            updated: [
                 {
+                    owner: 'student',
                     id: 'entry-1',
                     requirementId: 'polgar',
+                    cohort: '1500-1600',
                     previousCount: 10,
-                    newCount: 11,
-                    studyInfo: { itemKey: item.key, itemName: item.name },
+                    newCount: 10,
+                    dojoPoints: 0,
+                    totalDojoPoints: 4,
+                    minutesSpent: 0,
+                    totalMinutesSpent: 30,
+                    date: NOW_ISO,
+                    createdAt: NOW_ISO,
                 },
             ],
+            deleted: [],
         });
         expect(study().session?.done.has(item.key)).toBe(false);
         expect(study().session?.canUndo).toBe(false);
     });
 
     it('undoes nothing when a later mark has replaced the one Undo was clicked on', async () => {
-        let stored: RequirementProgress = progressAt(10);
-        mocks.api.getUser.mockImplementation(() =>
-            Promise.resolve({ data: { ...mocks.user, progress: { polgar: stored } } }),
-        );
+        liveServer();
         const release = deferred<undefined>();
-        mocks.api.updateUserProgress.mockImplementation((posted: UpdateUserProgressRequest) => {
-            stored = progressAt(posted.newCount);
-            const reply = answer(posted);
-            return posted.newCount === 12 ? release.promise.then(() => reply) : reply;
-        });
+        mocks.api.updateUserTimeline.mockImplementation((req: UpdateUserTimelineRequest) =>
+            release.promise.then(() => ({
+                data: { ...mocks.user, progress: { polgar: req.progress } },
+            })),
+        );
         const { study } = await ready(null, POLGAR_SOURCE);
         const [first, second] = study().book.chapters[0].items;
         await act(() => study().session?.markItemDone(first));
@@ -1455,7 +1738,15 @@ describe('useStudy: marking an item without the dialog', () => {
         });
         act(() => release.resolve(undefined));
         await waitFor(() => expect(undone).toBe(true));
-        expect(mocks.api.updateUserTimeline).not.toHaveBeenCalled();
+        expect(mocks.api.updateUserTimeline).toHaveBeenCalledTimes(1);
+        expect(mocks.api.updateUserTimeline.mock.calls[0][0]).toMatchObject({
+            updated: [
+                {
+                    newCount: 12,
+                    studyInfo: { items: [{ key: first.key }, { key: second.key }] },
+                },
+            ],
+        });
         expect(study().session?.done.has(first.key)).toBe(true);
         expect(study().session?.done.has(second.key)).toBe(true);
     });
@@ -1493,7 +1784,7 @@ describe('useStudy: marking an item without the dialog', () => {
         expect(mocks.api.updateUserProgress.mock.calls[1][0]).toMatchObject({
             previousCount: 10,
             newCount: 11,
-            studyInfo: { itemKey: item.key },
+            studyInfo: { items: [{ key: item.key }] },
         });
         expect(study().session?.done.has(item.key)).toBe(true);
         expect(study().session?.canUndo).toBe(true);
@@ -1534,7 +1825,7 @@ describe('useStudy: marking an item without the dialog', () => {
         await waitFor(() => expect(marked).toBe(true));
         expect(mocks.api.updateUserProgress).toHaveBeenCalledTimes(2);
         expect(mocks.api.updateUserProgress.mock.calls[1][0]).toMatchObject({
-            studyInfo: { itemKey: second.key },
+            studyInfo: { items: [{ key: second.key }] },
             previousCount: 10,
             newCount: 11,
         });

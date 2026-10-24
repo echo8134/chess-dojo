@@ -79,7 +79,7 @@ type TimelineEntry struct {
 	// The info on game submission, if this timeline entry is for a game submission
 	GameInfo *TimelineGameInfo `dynamodbav:"gameInfo,omitempty" json:"gameInfo,omitempty"`
 
-	// The study item this progress update is for, if the study page posted the entry
+	// The study items this entry covers, if the study page posted or edited it
 	StudyInfo *TimelineStudyInfo `dynamodbav:"studyInfo,omitempty" json:"studyInfo,omitempty"`
 
 	// The notes the user left on the timeline entry
@@ -123,13 +123,24 @@ type TimelineGameInfo struct {
 	Headers map[string]string `dynamodbav:"headers" json:"headers"`
 }
 
-// The study item a progress update is for
+// The study items a progress entry covers, when the study page posted or edited it
 type TimelineStudyInfo struct {
+	Items []TimelineStudyItem `dynamodbav:"items" json:"items"`
+}
+
+// One study item marked done in a progress entry
+type TimelineStudyItem struct {
 	// The key of the item within the task's material
-	ItemKey string `dynamodbav:"itemKey" json:"itemKey"`
+	Key string `dynamodbav:"key" json:"key"`
 
 	// The display name of the item
-	ItemName string `dynamodbav:"itemName" json:"itemName"`
+	Name string `dynamodbav:"name" json:"name"`
+
+	// The whole minutes the mark counted for this item
+	Minutes int `dynamodbav:"minutes" json:"minutes"`
+
+	// When the item was marked, RFC 3339
+	At string `dynamodbav:"at" json:"at"`
 }
 
 type Reaction struct {
