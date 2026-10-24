@@ -5,7 +5,7 @@ import { isGame } from '@/api/gameApi';
 import { Request, useRequest } from '@/api/Request';
 import { AuthStatus, useAuth } from '@/auth/Auth';
 import { BoardApi } from '@/board/Board';
-import { TimerContext } from '@/components/timer/TimerContext';
+import { TimerControlsContext } from '@/components/timer/TimerContext';
 import { GameContextType } from '@/context/useGame';
 import { Course } from '@/database/course';
 import { Game, GameKey } from '@/database/game';
@@ -187,7 +187,7 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
     const api = useApi();
     const { user, status: authStatus, updateUser } = useAuth();
     const { requirements, request: requirementsRequest } = useRequirements(ALL_COHORTS, false);
-    const timer = use(TimerContext);
+    const timer = use(TimerControlsContext);
     const { updateSearchParams } = useNextSearchParams();
     const copyRequest = useRequest();
 
@@ -660,7 +660,7 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
             // The training plan's rule applies. The post neither counts nor clears a timer on
             // another task.
             const timerOnTask = isTimerOnTask(task.id);
-            const minutes = timerOnTask ? Math.floor(timerRef.current.timerSeconds / 60) : 0;
+            const minutes = timerOnTask ? Math.floor(timerRef.current.getSeconds() / 60) : 0;
             const studyInfo = { itemKey: item.key, itemName: item.name };
             const resp = await apiRef.current.updateUserProgress({
                 cohort,
@@ -686,7 +686,7 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
             setEntries((prev) => [entry, ...prev]);
             if (timerOnTask) {
                 // The seconds this post did not count carry over to the next item.
-                const seconds = Math.max(0, timerRef.current.timerSeconds - minutes * 60);
+                const seconds = Math.max(0, timerRef.current.getSeconds() - minutes * 60);
                 timerRef.current.onRestart(task.id, seconds);
             }
             rememberMark({

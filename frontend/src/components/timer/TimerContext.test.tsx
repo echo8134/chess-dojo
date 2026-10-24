@@ -13,25 +13,30 @@ import { RatingSystem, User } from '@jackstenglein/chess-dojo-common/src/databas
 import { act, cleanup, fireEvent, screen } from '@testing-library/react';
 import { use } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { TimerContext, TimerContextProvider } from './TimerContext';
+import { TimerContext, TimerContextProvider, TimerControlsContext } from './TimerContext';
 
 const apiUpdateUser = vi.fn();
+const apiGetUser = vi.fn();
 
 const authState = vi.hoisted(() => ({
     user: null as User | null,
     status: 'Authenticated' as AuthStatus,
+    listeners: new Set<() => void>(),
 }));
 
+// The provider derives the clock from the user record, so an update has to re-render it the way
+// AuthProvider does.
 const updateUserImpl = vi.hoisted(() =>
     vi.fn((partial: Partial<User>) => {
         if (authState.user) {
             authState.user = { ...authState.user, ...partial };
+            authState.listeners.forEach((notify) => notify());
         }
     }),
 );
 
 vi.mock('@/api/Api', () => ({
-    useApi: () => ({ updateUser: apiUpdateUser }),
+    useApi: () => ({ updateUser: apiUpdateUser, getUser: apiGetUser }),
 }));
 
 vi.mock('@/api/cache/requirements', () => ({
@@ -40,10 +45,17 @@ vi.mock('@/api/cache/requirements', () => ({
 
 vi.mock('@/auth/Auth', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/auth/Auth')>();
+    const { useSyncExternalStore } = await import('react');
+    const subscribe = (notify: () => void) => {
+        authState.listeners.add(notify);
+        return () => {
+            authState.listeners.delete(notify);
+        };
+    };
     return {
         ...actual,
         useAuth: () => ({
-            user: authState.user,
+            user: useSyncExternalStore(subscribe, () => authState.user),
             status: authState.status,
             updateUser: updateUserImpl,
         }),
@@ -128,6 +140,18 @@ function renderTimer(taskId?: string, restartFrom?: number) {
     );
 }
 
+/** Advances the fake clock and lets a renewal's fetch settle. */
+const advance = (ms: number) =>
+    act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+    });
+
+const RUNNING_SINCE_11_59 = {
+    timerSeconds: 0,
+    timerStartedAt: '2026-05-27T11:59:00.000Z',
+    timerTaskId: 'task-a',
+};
+
 describe('TimerContextProvider', () => {
     beforeEach(() => {
         vi.useFakeTimers();
@@ -136,6 +160,9 @@ describe('TimerContextProvider', () => {
         authState.user = makeUser();
         authState.status = AuthStatus.Authenticated;
         apiUpdateUser.mockReset();
+        // What the server holds in these tests is the hoisted user, unless a test says otherwise.
+        apiGetUser.mockReset();
+        apiGetUser.mockImplementation(() => Promise.resolve({ data: authState.user }));
         updateUserImpl.mockClear();
         vi.mocked(useRequirement).mockReturnValue({ requirement: undefined } as ReturnType<
             typeof useRequirement
@@ -210,6 +237,13 @@ describe('TimerContextProvider', () => {
         });
         renderTimer('task-b');
         expect(screen.getByTestId('label')).toHaveTextContent('Clear and Restart Timer');
+    });
+
+    it('returns Resume Timer label right after a pause', () => {
+        authState.user = makeUser(RUNNING_SINCE_11_59);
+        renderTimer('task-a');
+        fireEvent.click(screen.getByTestId('pause'));
+        expect(screen.getByTestId('label')).toHaveTextContent('Resume Timer (01:00)');
     });
 
     it('starts the timer and persists to the API', () => {
@@ -294,7 +328,7 @@ describe('TimerContextProvider', () => {
             expect.objectContaining({
                 timerSeconds: 60,
                 timerStartedAt: '',
-                timerTaskId: undefined,
+                timerTaskId: 'task-a',
             }),
         );
     });
@@ -354,6 +388,210 @@ describe('TimerContextProvider', () => {
             vi.advanceTimersByTime(1000);
         });
         expect(screen.getByTestId('seconds')).toHaveTextContent('61');
+    });
+
+    it('a controls consumer does not re-render on the tick', () => {
+        const startedAt = new Date('2026-05-27T11:59:00Z').toISOString();
+        authState.user = makeUser({ timerSeconds: 0, timerStartedAt: startedAt });
+        const renders = vi.fn();
+        function ControlsConsumer() {
+            use(TimerControlsContext);
+            renders();
+            return null;
+        }
+        renderWithIntl(
+            <TimerContextProvider>
+                <TimerConsumer />
+                <ControlsConsumer />
+            </TimerContextProvider>,
+        );
+        const rendersBefore = renders.mock.calls.length;
+
+        act(() => {
+            vi.advanceTimersByTime(3000);
+        });
+        expect(screen.getByTestId('seconds')).toHaveTextContent('63');
+        expect(renders).toHaveBeenCalledTimes(rendersBefore);
+    });
+
+    it('checks in five minutes after the last check-in while running', async () => {
+        authState.user = makeUser(RUNNING_SINCE_11_59);
+        renderTimer();
+
+        await advance(4 * 60_000);
+        const first = {
+            timerSeconds: 300,
+            timerStartedAt: '2026-05-27T12:04:00.000Z',
+            timerTaskId: 'task-a',
+        };
+        expect(apiUpdateUser.mock.calls).toEqual([[first]]);
+        expect(screen.getByTestId('seconds')).toHaveTextContent('300');
+        expect(screen.getByTestId('isRunning')).toHaveTextContent('true');
+
+        await advance(5 * 60_000);
+        expect(apiUpdateUser.mock.calls).toEqual([
+            [first],
+            [{ ...first, timerSeconds: 600, timerStartedAt: '2026-05-27T12:09:00.000Z' }],
+        ]);
+    });
+
+    it('checks in at once when the clock is already five minutes into its stretch', async () => {
+        authState.user = makeUser({
+            ...RUNNING_SINCE_11_59,
+            timerStartedAt: '2026-05-27T11:53:00.000Z',
+        });
+        renderTimer();
+
+        await advance(0);
+        expect(apiUpdateUser.mock.calls).toEqual([
+            [
+                {
+                    timerSeconds: 420,
+                    timerStartedAt: '2026-05-27T12:00:00.000Z',
+                    timerTaskId: 'task-a',
+                },
+            ],
+        ]);
+        expect(screen.getByTestId('seconds')).toHaveTextContent('420');
+        expect(screen.getByTestId('isRunning')).toHaveTextContent('true');
+    });
+
+    it('adopts a pause from the server at the check-in instead of renewing', async () => {
+        authState.user = makeUser(RUNNING_SINCE_11_59);
+        apiGetUser.mockResolvedValueOnce({
+            data: { ...authState.user, timerStartedAt: '', timerSeconds: 200 },
+        });
+        renderTimer();
+
+        await advance(4 * 60_000);
+        expect(apiUpdateUser).not.toHaveBeenCalled();
+        expect(screen.getByTestId('isRunning')).toHaveTextContent('false');
+        expect(screen.getByTestId('isPaused')).toHaveTextContent('true');
+        expect(screen.getByTestId('seconds')).toHaveTextContent('200');
+    });
+
+    it('adopts another task from the server at the check-in instead of renewing', async () => {
+        authState.user = makeUser({
+            ...RUNNING_SINCE_11_59,
+            customTasks: [{ id: 'task-b', name: 'Task B' } as CustomTask],
+        });
+        apiGetUser.mockResolvedValueOnce({
+            data: {
+                ...authState.user,
+                timerTaskId: 'task-b',
+                timerSeconds: 30,
+                timerStartedAt: '',
+            },
+        });
+        renderTimer();
+
+        await advance(4 * 60_000);
+        expect(apiUpdateUser).not.toHaveBeenCalled();
+        expect(screen.getByTestId('taskName')).toHaveTextContent('Task B');
+        expect(screen.getByTestId('isRunning')).toHaveTextContent('false');
+        expect(screen.getByTestId('seconds')).toHaveTextContent('30');
+    });
+
+    it('keeps a pause made while the check-in fetch was in flight', async () => {
+        authState.user = makeUser(RUNNING_SINCE_11_59);
+        let resolveFetch: ((response: { data: User }) => void) | undefined;
+        apiGetUser.mockImplementationOnce(
+            () =>
+                new Promise<{ data: User }>((resolve) => {
+                    resolveFetch = resolve;
+                }),
+        );
+        renderTimer();
+        await advance(4 * 60_000);
+        expect(apiGetUser).toHaveBeenCalledTimes(1);
+
+        fireEvent.click(screen.getByTestId('pause'));
+        const paused = { timerSeconds: 300, timerStartedAt: '', timerTaskId: 'task-a' };
+        expect(apiUpdateUser.mock.calls).toEqual([[paused]]);
+
+        // The server answers with the copy from before the pause.
+        await act(async () => {
+            resolveFetch?.({ data: makeUser(RUNNING_SINCE_11_59) });
+            await vi.advanceTimersByTimeAsync(0);
+        });
+        expect(apiUpdateUser.mock.calls).toEqual([[paused]]);
+        expect(screen.getByTestId('isRunning')).toHaveTextContent('false');
+        expect(screen.getByTestId('isPaused')).toHaveTextContent('true');
+        expect(screen.getByTestId('seconds')).toHaveTextContent('300');
+    });
+
+    it('keeps running and checks in five minutes later when the fetch fails', async () => {
+        authState.user = makeUser(RUNNING_SINCE_11_59);
+        apiGetUser.mockRejectedValueOnce(new Error('offline'));
+        renderTimer();
+
+        await advance(4 * 60_000);
+        expect(apiUpdateUser).not.toHaveBeenCalled();
+        expect(screen.getByTestId('isRunning')).toHaveTextContent('true');
+        expect(screen.getByTestId('seconds')).toHaveTextContent('300');
+
+        await advance(5 * 60_000);
+        expect(apiUpdateUser.mock.calls).toEqual([
+            [
+                {
+                    timerSeconds: 600,
+                    timerStartedAt: '2026-05-27T12:09:00.000Z',
+                    timerTaskId: 'task-a',
+                },
+            ],
+        ]);
+    });
+
+    it('shows zero, not a negative count, for a start that is still ahead', () => {
+        renderTimer();
+        act(() => {
+            updateUserImpl({ ...RUNNING_SINCE_11_59, timerStartedAt: '2026-05-27T12:00:05.000Z' });
+        });
+        expect(screen.getByTestId('seconds').textContent).toBe('0');
+        expect(screen.getByTestId('isRunning')).toHaveTextContent('true');
+        expect(document.title).toBe('00:00 - ChessDojo');
+
+        act(() => {
+            vi.advanceTimersByTime(6000);
+        });
+        expect(screen.getByTestId('seconds').textContent).toBe('1');
+    });
+
+    it('writes an expired running clock as paused on load', () => {
+        const startedAt = new Date('2026-05-27T11:49:00Z').toISOString();
+        authState.user = makeUser({
+            timerSeconds: 600,
+            timerStartedAt: startedAt,
+            timerTaskId: 'task-a',
+        });
+        renderTimer();
+
+        expect(apiUpdateUser.mock.calls).toEqual([
+            [{ timerSeconds: 600, timerStartedAt: '', timerTaskId: 'task-a' }],
+        ]);
+        expect(screen.getByTestId('isRunning')).toHaveTextContent('false');
+        expect(screen.getByTestId('isPaused')).toHaveTextContent('true');
+        expect(screen.getByTestId('seconds')).toHaveTextContent('600');
+    });
+
+    it('repairs an expired clock once when the record arrives a second time', () => {
+        const expired = {
+            timerSeconds: 600,
+            timerStartedAt: new Date('2026-05-27T11:49:00Z').toISOString(),
+            timerTaskId: 'task-a',
+        };
+        authState.user = makeUser(expired);
+        renderTimer();
+        expect(apiUpdateUser).toHaveBeenCalledTimes(1);
+
+        // A second GET of the user record lands after the repair with the stale running clock.
+        act(() => {
+            updateUserImpl(expired);
+        });
+        expect(apiUpdateUser).toHaveBeenCalledTimes(1);
+        expect(screen.getByTestId('isRunning')).toHaveTextContent('false');
+        expect(screen.getByTestId('isPaused')).toHaveTextContent('true');
+        expect(screen.getByTestId('seconds')).toHaveTextContent('600');
     });
 
     it('updates document title while running and restores it when stopped', () => {

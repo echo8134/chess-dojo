@@ -1,6 +1,6 @@
 import { UpdateUserProgressRequest, UpdateUserTimelineRequest } from '@/api/userApi';
 import { BoardApi } from '@/board/Board';
-import { Timer, TimerContext } from '@/components/timer/TimerContext';
+import { TimerControls, TimerControlsContext } from '@/components/timer/TimerContext';
 import { Course, CourseModuleType, CourseType } from '@/database/course';
 import { Game } from '@/database/game';
 import {
@@ -13,7 +13,7 @@ import {
 import { TimelineEntry } from '@/database/timeline';
 import { Chess } from '@jackstenglein/chess';
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { ReactNode, useState } from 'react';
+import { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { itemsOf } from './book';
 import { clearCourseCache } from './courseCache';
@@ -211,19 +211,20 @@ vi.mock('@/hooks/useNextSearchParams', () => ({
     }),
 }));
 
+let timerSeconds = 0;
 const timer = {
     isRunning: false,
     isPaused: false,
-    timerSeconds: 0,
     task: undefined,
     onStart: vi.fn(),
     onPause: vi.fn(),
     onClear: vi.fn(),
     onRestart: vi.fn(),
-} as unknown as Timer;
+    getSeconds: () => timerSeconds,
+} as unknown as TimerControls;
 
 const wrapper = ({ children }: { children: ReactNode }) => (
-    <TimerContext.Provider value={timer}>{children}</TimerContext.Provider>
+    <TimerControlsContext.Provider value={timer}>{children}</TimerControlsContext.Provider>
 );
 
 const TASK_SOURCE: StudySource = { kind: 'task', taskId: 'task-1' };
@@ -279,7 +280,7 @@ beforeEach(() => {
     (timer.onStart as ReturnType<typeof vi.fn>).mockReset();
     (timer.onClear as ReturnType<typeof vi.fn>).mockReset();
     (timer.onRestart as ReturnType<typeof vi.fn>).mockReset();
-    timer.timerSeconds = 0;
+    timerSeconds = 0;
     timer.task = undefined;
     mocks.freshApi = false;
 });
@@ -327,7 +328,7 @@ describe('useStudy: book, current item and done marks', () => {
 
     it("leaves a paused timer on another task alone before that task loads, and resumes the task's own", async () => {
         // The timer's own task has not loaded, so the context names no task.
-        timer.timerSeconds = 1500;
+        timerSeconds = 1500;
         mocks.user = { ...mocks.user, timerTaskId: 'polgar' };
         const other = await ready();
         expect(timer.onStart).not.toHaveBeenCalled();
@@ -1106,7 +1107,7 @@ describe('useStudy: marking an item without the dialog', () => {
         const fresh = { ...mocks.user, progress: { polgar: progressAt(10) } };
         mocks.api.getUser.mockResolvedValue({ data: fresh });
         mocks.api.updateUserProgress.mockImplementation(answer);
-        timer.timerSeconds = 7 * 60 + 59;
+        timerSeconds = 7 * 60 + 59;
         const { study } = await ready(null, POLGAR_SOURCE);
         const item = study().current;
         expect(study().session?.done.has(item.key)).toBe(false);
@@ -1188,7 +1189,7 @@ describe('useStudy: marking an item without the dialog', () => {
         const read = () =>
             Promise.resolve({ data: { ...mocks.user, progress: { polgar: stored } } });
         // The second count refresh answers the way the network does, after the first mark's
-        // timer restart has rendered.
+        // timer restart.
         const refresh = deferred<undefined>();
         mocks.api.getUser
             .mockImplementationOnce(read)
@@ -1201,17 +1202,22 @@ describe('useStudy: marking an item without the dialog', () => {
                 ? release.promise.then(() => response)
                 : response;
         });
-        // Like TimerContextProvider, hand out a new timer object on every render.
-        function FreshTimer({ children }: { children: ReactNode }) {
-            const [seconds, setSeconds] = useState(600);
-            const value: Timer = {
-                ...timer,
-                timerSeconds: seconds,
-                onRestart: (_taskId: string, from = 0) => setSeconds(from),
-            };
-            return <TimerContext.Provider value={value}>{children}</TimerContext.Provider>;
-        }
-        const rendered = renderHook(() => useStudy(POLGAR_SOURCE, null), { wrapper: FreshTimer });
+        // A mark reads the clock when it runs, so it sees the restart the previous mark wrote.
+        let seconds = 600;
+        const live: TimerControls = {
+            ...timer,
+            getSeconds: () => seconds,
+            onRestart: (_taskId: string, from = 0) => {
+                seconds = from;
+            },
+        };
+        const rendered = renderHook(() => useStudy(POLGAR_SOURCE, null), {
+            wrapper: ({ children }) => (
+                <TimerControlsContext.Provider value={live}>
+                    {children}
+                </TimerControlsContext.Provider>
+            ),
+        });
         await waitFor(() => expect(rendered.result.current.status).toBe('ready'));
         const study = () => rendered.result.current as StudyReady;
         const [first, second] = study().book.chapters[0].items;
@@ -1238,7 +1244,7 @@ describe('useStudy: marking an item without the dialog', () => {
 
     it('counts no minutes and leaves the timer alone when it runs on another task', async () => {
         mocks.api.updateUserProgress.mockImplementation(answer);
-        timer.timerSeconds = 600;
+        timerSeconds = 600;
         // The timer's own task has not loaded, so the context names no task.
         mocks.user = { ...mocks.user, timerTaskId: 'task-1' };
         const { study } = await ready(null, POLGAR_SOURCE);

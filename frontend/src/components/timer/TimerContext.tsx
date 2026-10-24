@@ -5,16 +5,31 @@ import { useRequirement } from '@/api/cache/requirements';
 import { useAuth } from '@/auth/Auth';
 import { formatTime } from '@/board/pgn/boardTools/underboard/clock/ClockUsage';
 import { CustomTask, Requirement } from '@/database/requirement';
-import { User } from '@/database/user';
 import { useTranslations } from 'next-intl';
-import { createContext, ReactNode, useEffect, useEffectEvent, useState } from 'react';
+import { createContext, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+    CHECK_IN_MS,
+    checkIn,
+    clear,
+    Clock,
+    clockFrom,
+    elapsedSeconds,
+    isExpired,
+    pause,
+    restart,
+    sameClock,
+    start,
+    toUserFields,
+} from './clock';
 
 /** Regex which matches the timer in the title of the page */
 const TIMER_TITLE_REGEX = /^[\d:]+ - /;
 
-/** The details of the work timer. */
-export interface Timer {
-    timerSeconds: number;
+/**
+ * The work timer's state and controls. The value changes when the run state, the task or the
+ * task dialog changes, not on the tick, so a consumer can hold it without re-rendering each second.
+ */
+export interface TimerControls {
     isRunning: boolean;
     isPaused: boolean;
     task?: Requirement | CustomTask;
@@ -29,9 +44,22 @@ export interface Timer {
      * nothing itself.
      */
     onRestart: (taskId: string, seconds?: number) => void;
+    /** Writes the clock as given, in one write. */
+    setClock: (next: Clock) => void;
+    /** The clock as the latest user record holds it. */
+    getClock: () => Clock;
+    /** The seconds on the clock at the moment of the call. */
+    getSeconds: () => number;
+}
+
+/** The details of the work timer, with the seconds that tick while it runs. */
+export interface Timer extends TimerControls {
+    timerSeconds: number;
+    /** The label of the control for the task, from the seconds as rendered. */
     getLabel: (taskId?: string) => string;
 }
 
+export const TimerControlsContext = createContext<TimerControls>(null as unknown as TimerControls);
 export const TimerContext = createContext<Timer>(null as unknown as Timer);
 
 /**
@@ -42,142 +70,160 @@ export function TimerContextProvider({ children }: { children: ReactNode }) {
     const t = useTranslations('timer');
     const { user, updateUser } = useAuth();
     const api = useApi();
-    const [timerSeconds, setTimerSeconds] = useState(() => getTimerSeconds(user));
+    const [now, setNow] = useState(() => Date.now());
     const [showTask, setShowTask] = useState(false);
-    const [initialized, setInitialized] = useState(false);
     const { requirement } = useRequirement(user?.timerTaskId);
     const customTask = user?.customTasks?.find((ct) => ct.id === user.timerTaskId);
+    const task = customTask || requirement;
 
-    const [isRunning, setIsRunning] = useState(Boolean(user?.timerStartedAt));
-    const isPaused = !isRunning && Boolean(user?.timerSeconds);
+    const clock = clockFrom(user);
+    const expired = clock.kind === 'running' && isExpired(clock, now);
+    const isRunning = clock.kind === 'running' && !expired;
+    // An expired clock reads as paused until its repair lands, so the navbar does not flicker.
+    const isPaused = (clock.kind === 'paused' && clock.seconds > 0) || expired;
+    const timerSeconds = elapsedSeconds(clock, now);
+    const since = clock.kind === 'running' ? clock.since : undefined;
 
-    const onInitialize = useEffectEvent(() => {
-        setInitialized(true);
-        setTimerSeconds(getTimerSeconds(user));
-        setIsRunning(Boolean(user?.timerStartedAt));
-    });
+    // The ops keep one identity across renders and read the committed render here.
+    const latest = useRef({ clock, isRunning, task, api });
     useEffect(() => {
-        if (!initialized && user) {
-            onInitialize();
-        }
-    }, [user, initialized]);
-
-    const onTick = useEffectEvent(() => {
-        const seconds = getTimerSeconds(user);
-        setTimerSeconds(seconds);
-        document.title =
-            formatTime(seconds) + ` - ` + document.title.replace(TIMER_TITLE_REGEX, '');
+        latest.current = { clock, isRunning, task, api };
     });
 
-    useEffect(() => {
-        if (isRunning) {
-            onTick();
-            const id = setInterval(onTick, 1000);
-            return () => clearInterval(id);
-        } else {
-            document.title = document.title.replace(TIMER_TITLE_REGEX, '');
-        }
-    }, [isRunning, setTimerSeconds, user]);
-
-    const onStart = (taskId?: string) => {
-        const timerStartedAt = new Date().toISOString();
-        const update: Partial<User> = { timerStartedAt, timerTaskId: taskId || user?.timerTaskId };
-
-        if (user?.timerTaskId && taskId && user.timerTaskId !== taskId) {
-            update.timerSeconds = 0;
-            setTimerSeconds(0);
-        }
-
-        setIsRunning(true);
-        updateUser(update);
-        void api.updateUser(update);
-    };
-
-    const onPause = (taskId?: string, openDialog?: boolean) => {
-        const timerSeconds = getTimerSeconds(user);
-        setIsRunning(false);
-        updateUser({ timerSeconds, timerStartedAt: '', timerTaskId: taskId || user?.timerTaskId });
-        void api.updateUser({ timerSeconds, timerStartedAt: '', timerTaskId: taskId });
-        if (openDialog && (customTask || requirement)) {
-            setShowTask(true);
-        }
-    };
-
-    const onClear = () => {
-        setIsRunning(false);
-        updateUser({ timerSeconds: 0, timerStartedAt: '', timerTaskId: '' });
-        void api.updateUser({ timerSeconds: 0, timerStartedAt: '', timerTaskId: '' });
-        setTimerSeconds(0);
-    };
-
-    // A clear followed by a start would be two writes that can land in either order.
-    const onRestart = (taskId: string, seconds = 0) => {
-        const update = {
-            timerSeconds: seconds,
-            timerStartedAt: new Date().toISOString(),
-            timerTaskId: taskId,
+    const ops = useMemo(() => {
+        const getClock = () => latest.current.clock;
+        const write = (next: Clock) => {
+            const fields = toUserFields(next);
+            setNow(Date.now());
+            updateUser(fields);
+            void latest.current.api.updateUser(fields);
         };
-        setTimerSeconds(seconds);
-        setIsRunning(true);
-        updateUser(update);
-        void api.updateUser(update);
-    };
+        const onOtherTask = (taskId?: string) => {
+            const clock = getClock();
+            return clock.kind !== 'idle' && !!clock.taskId && taskId !== clock.taskId;
+        };
+        const onStart = (taskId?: string) => write(start(getClock(), taskId, Date.now()));
+        const onPause = (taskId?: string, openDialog?: boolean) => {
+            write(pause(getClock(), Date.now(), taskId));
+            if (openDialog && latest.current.task) {
+                setShowTask(true);
+            }
+        };
+        return {
+            onStart,
+            onPause,
+            onToggle: (taskId?: string) => {
+                if (!onOtherTask(taskId) && latest.current.isRunning) {
+                    onPause(taskId, true);
+                } else {
+                    onStart(taskId);
+                }
+            },
+            onClear: () => write(clear()),
+            onRestart: (taskId: string, seconds = 0) => write(restart(taskId, seconds, Date.now())),
+            setClock: write,
+            getClock,
+            getSeconds: () => elapsedSeconds(getClock(), Date.now()),
+        };
+    }, [updateUser]);
 
-    const getLabel = (taskId?: string) => {
-        if (!user?.timerTaskId || taskId === user?.timerTaskId) {
+    // Banks the stretch so far, after adopting the server's copy. Otherwise this tab would write
+    // "running" over a pause, clear or task switch made in another tab.
+    const renew = useCallback(async () => {
+        const before = ops.getClock();
+        const fetched = await latest.current.api.getUser().catch(() => undefined);
+        if (!fetched) {
+            return;
+        }
+        // The member acted while the fetch was in flight. Their write wins over the fetched copy.
+        if (!sameClock(ops.getClock(), before)) {
+            return;
+        }
+        updateUser(fetched.data);
+        const clock = clockFrom(fetched.data);
+        if (clock.kind === 'running') {
+            ops.setClock(checkIn(clock, Date.now()));
+        }
+    }, [ops, updateUser]);
+
+    // The first sample runs at once, so a running record that arrives from a fetch does not render
+    // with the last tick's time.
+    useEffect(() => {
+        if (!isRunning) {
+            return;
+        }
+        const tick = () => setNow(Date.now());
+        tick();
+        const id = setInterval(tick, 1000);
+        return () => clearInterval(id);
+    }, [isRunning, since]);
+
+    useEffect(() => {
+        const title = document.title.replace(TIMER_TITLE_REGEX, '');
+        document.title = isRunning ? `${formatTime(timerSeconds)} - ${title}` : title;
+    }, [isRunning, timerSeconds]);
+
+    // Renewals follow the clock's own stretch, so a record that arrives mid-stretch renews on time.
+    // Only a failed renewal reaches the interval. A successful one restamps `since`, and the
+    // effect re-arms from there.
+    useEffect(() => {
+        if (!isRunning || since === undefined) {
+            return;
+        }
+        let retry: ReturnType<typeof setInterval> | undefined;
+        const id = setTimeout(
+            () => {
+                void renew();
+                retry = setInterval(() => void renew(), CHECK_IN_MS);
+            },
+            Math.max(0, CHECK_IN_MS - (Date.now() - since)),
+        );
+        return () => {
+            clearTimeout(id);
+            clearInterval(retry);
+        };
+    }, [isRunning, since, renew]);
+
+    // The page that was counting is gone. Stop the clock at its last check-in, once per stretch.
+    // The record arrives twice at load, and the second copy can still carry the expired clock.
+    const repaired = useRef<number | undefined>(undefined);
+    useEffect(() => {
+        if (!expired || since === undefined || repaired.current === since) {
+            return;
+        }
+        repaired.current = since;
+        ops.setClock(checkIn(ops.getClock(), Date.now()));
+    }, [expired, since, ops]);
+
+    const controls = useMemo<TimerControls>(
+        () => ({ ...ops, isRunning, isPaused, task, showTask, setShowTask }),
+        [ops, isRunning, isPaused, task, showTask],
+    );
+    // Consumers call this while rendering, so it reads this render rather than the ops' committed one.
+    const held = clock.kind === 'idle' ? '' : clock.taskId;
+    const getLabel = useCallback(
+        (taskId?: string) => {
+            if (held && taskId !== held) {
+                return t('clearAndRestart');
+            }
             if (isRunning) {
                 return t('pauseTimer', { time: formatTime(timerSeconds) });
             }
-            if (user?.timerSeconds) {
+            if (timerSeconds) {
                 return t('resumeTimer', { time: formatTime(timerSeconds) });
             }
             return t('startTimer');
-        }
-
-        return t('clearAndRestart');
-    };
-
-    const onToggle = (taskId?: string) => {
-        if ((!user?.timerTaskId || taskId === user?.timerTaskId) && isRunning) {
-            onPause(taskId, true);
-        } else {
-            onStart(taskId);
-        }
-    };
+        },
+        [held, isRunning, timerSeconds, t],
+    );
+    const timer = useMemo<Timer>(
+        () => ({ ...controls, timerSeconds, getLabel }),
+        [controls, timerSeconds, getLabel],
+    );
 
     return (
-        <TimerContext
-            value={{
-                timerSeconds,
-                isRunning,
-                isPaused,
-                task: customTask || requirement,
-                showTask,
-                setShowTask,
-                onStart,
-                onPause,
-                onClear,
-                onRestart,
-                getLabel,
-                onToggle,
-            }}
-        >
-            {children}
-        </TimerContext>
+        <TimerControlsContext value={controls}>
+            <TimerContext value={timer}>{children}</TimerContext>
+        </TimerControlsContext>
     );
-}
-
-/**
- * Returns the number of seconds on the given user's work timer.
- * @param user The user to get the work timer for.
- * @returns The number of seconds on the user's work timer.
- */
-function getTimerSeconds(user: Pick<User, 'timerSeconds' | 'timerStartedAt'> | undefined): number {
-    let timerSeconds = user?.timerSeconds ?? 0;
-    if (user?.timerStartedAt) {
-        const now = Date.now();
-        const startedAt = new Date(user.timerStartedAt).getTime();
-        timerSeconds += (now - startedAt) / 1000;
-    }
-    return Math.floor(timerSeconds);
 }
