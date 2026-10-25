@@ -11,9 +11,15 @@ import {
 import { renderWithIntl } from '@/i18n/intl.test';
 import { RatingSystem, User } from '@jackstenglein/chess-dojo-common/src/database/user';
 import { act, cleanup, fireEvent, screen } from '@testing-library/react';
-import { use } from 'react';
+import { use, useEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { TimerContext, TimerContextProvider, TimerControlsContext } from './TimerContext';
+import { Clock, start } from './clock';
+import {
+    TimerContext,
+    TimerContextProvider,
+    TimerControls,
+    TimerControlsContext,
+} from './TimerContext';
 
 const apiUpdateUser = vi.fn();
 const apiGetUser = vi.fn();
@@ -96,7 +102,7 @@ function makeUser(overrides: Partial<User> = {}): User {
     } as User;
 }
 
-function TimerConsumer({ taskId, restartFrom }: { taskId?: string; restartFrom?: number }) {
+function TimerConsumer({ taskId }: { taskId?: string }) {
     const timer = use(TimerContext);
     const taskName =
         timer.task && 'shortName' in timer.task
@@ -121,26 +127,51 @@ function TimerConsumer({ taskId, restartFrom }: { taskId?: string; restartFrom?:
             <button type='button' data-testid='toggle' onClick={() => timer.onToggle(taskId)}>
                 Toggle
             </button>
-            <button
-                type='button'
-                data-testid='restart'
-                onClick={() => timer.onRestart(taskId ?? '', restartFrom)}
-            >
-                Restart
-            </button>
         </div>
     );
 }
 
-function renderTimer(taskId?: string, restartFrom?: number) {
+function renderTimer(taskId?: string) {
     return renderWithIntl(
         <TimerContextProvider>
-            <TimerConsumer taskId={taskId} restartFrom={restartFrom} />
+            <TimerConsumer taskId={taskId} />
         </TimerContextProvider>,
     );
 }
 
-/** Advances the fake clock and lets a renewal's fetch settle. */
+let grabbed: TimerControls | undefined;
+function Grab() {
+    grabbed = use(TimerControlsContext);
+    return null;
+}
+
+/** Renders the consumer and hands back the controls, whose ops keep one identity. */
+function renderTimerWithControls(taskId?: string) {
+    renderWithIntl(
+        <TimerContextProvider>
+            <TimerConsumer taskId={taskId} />
+            <Grab />
+        </TimerContextProvider>,
+    );
+    if (!grabbed) {
+        throw new Error('the provider rendered no controls');
+    }
+    return grabbed;
+}
+
+function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((res) => {
+        resolve = res;
+    });
+    return { promise, resolve };
+}
+
+/** Every timer write goes out with keepalive, so a pause written while the page unloads lands. */
+const KEEPALIVE = { keepalive: true };
+const written = (...fields: object[]) => fields.map((f) => [f, undefined, KEEPALIVE]);
+
+/** Advances the fake clock and lets a write go out or a fetch settle. */
 const advance = (ms: number) =>
     act(async () => {
         await vi.advanceTimersByTimeAsync(ms);
@@ -160,6 +191,7 @@ describe('TimerContextProvider', () => {
         authState.user = makeUser();
         authState.status = AuthStatus.Authenticated;
         apiUpdateUser.mockReset();
+        grabbed = undefined;
         // What the server holds in these tests is the hoisted user, unless a test says otherwise.
         apiGetUser.mockReset();
         apiGetUser.mockImplementation(() => Promise.resolve({ data: authState.user }));
@@ -246,9 +278,10 @@ describe('TimerContextProvider', () => {
         expect(screen.getByTestId('label')).toHaveTextContent('Resume Timer (01:00)');
     });
 
-    it('starts the timer and persists to the API', () => {
+    it('starts the timer and persists to the API', async () => {
         renderTimer();
         fireEvent.click(screen.getByTestId('start'));
+        await advance(0);
 
         expect(screen.getByTestId('isRunning')).toHaveTextContent('true');
         expect(updateUserImpl).toHaveBeenCalledWith(
@@ -262,10 +295,12 @@ describe('TimerContextProvider', () => {
                 // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
                 timerStartedAt: expect.any(String),
             }),
+            undefined,
+            KEEPALIVE,
         );
     });
 
-    it('resets elapsed seconds when starting a different task', () => {
+    it('resets elapsed seconds when starting a different task', async () => {
         authState.user = makeUser({
             timerTaskId: 'task-a',
             timerSeconds: 120,
@@ -273,6 +308,7 @@ describe('TimerContextProvider', () => {
         });
         renderTimer('task-b');
         fireEvent.click(screen.getByTestId('start'));
+        await advance(0);
 
         expect(screen.getByTestId('seconds')).toHaveTextContent('0');
         expect(updateUserImpl).toHaveBeenCalledWith(
@@ -280,33 +316,12 @@ describe('TimerContextProvider', () => {
         );
         expect(apiUpdateUser).toHaveBeenCalledWith(
             expect.objectContaining({ timerSeconds: 0, timerTaskId: 'task-b' }),
+            undefined,
+            KEEPALIVE,
         );
     });
 
-    it('restarts on a task from the seconds given, or zero, in one write', () => {
-        authState.user = makeUser({ timerTaskId: 'task-a', timerSeconds: 479, timerStartedAt: '' });
-        renderTimer('task-b', 59);
-        fireEvent.click(screen.getByTestId('restart'));
-
-        const update = {
-            timerSeconds: 59,
-            timerStartedAt: '2026-05-27T12:00:00.000Z',
-            timerTaskId: 'task-b',
-        };
-        expect(apiUpdateUser.mock.calls).toEqual([[update]]);
-        expect(updateUserImpl).toHaveBeenCalledWith(update);
-        expect(screen.getByTestId('seconds')).toHaveTextContent('59');
-        expect(screen.getByTestId('isRunning')).toHaveTextContent('true');
-
-        cleanup();
-        apiUpdateUser.mockReset();
-        renderTimer('task-b');
-        fireEvent.click(screen.getByTestId('restart'));
-        expect(apiUpdateUser.mock.calls).toEqual([[{ ...update, timerSeconds: 0 }]]);
-        expect(screen.getByTestId('seconds')).toHaveTextContent('0');
-    });
-
-    it('pauses the timer and saves elapsed seconds', () => {
+    it('pauses the timer and saves elapsed seconds', async () => {
         const startedAt = new Date('2026-05-27T11:59:00Z').toISOString();
         authState.user = makeUser({
             timerSeconds: 0,
@@ -315,6 +330,7 @@ describe('TimerContextProvider', () => {
         });
         renderTimer();
         fireEvent.click(screen.getByTestId('pause'));
+        await advance(0);
 
         expect(screen.getByTestId('isRunning')).toHaveTextContent('false');
         expect(updateUserImpl).toHaveBeenCalledWith(
@@ -330,13 +346,16 @@ describe('TimerContextProvider', () => {
                 timerStartedAt: '',
                 timerTaskId: 'task-a',
             }),
+            undefined,
+            KEEPALIVE,
         );
     });
 
-    it('clears the timer', () => {
+    it('clears the timer', async () => {
         authState.user = makeUser({ timerSeconds: 90, timerStartedAt: '' });
         renderTimer();
         fireEvent.click(screen.getByTestId('clear'));
+        await advance(0);
 
         expect(screen.getByTestId('seconds')).toHaveTextContent('0');
         expect(screen.getByTestId('isRunning')).toHaveTextContent('false');
@@ -345,11 +364,11 @@ describe('TimerContextProvider', () => {
             timerStartedAt: '',
             timerTaskId: '',
         });
-        expect(apiUpdateUser).toHaveBeenCalledWith({
-            timerSeconds: 0,
-            timerStartedAt: '',
-            timerTaskId: '',
-        });
+        expect(apiUpdateUser).toHaveBeenCalledWith(
+            { timerSeconds: 0, timerStartedAt: '', timerTaskId: '' },
+            undefined,
+            KEEPALIVE,
+        );
     });
 
     it('toggles pause when the same task is running', () => {
@@ -414,6 +433,30 @@ describe('TimerContextProvider', () => {
         expect(renders).toHaveBeenCalledTimes(rendersBefore);
     });
 
+    it('exposes the clock on the controls and follows the record through a pause', () => {
+        authState.user = makeUser({ ...RUNNING_SINCE_11_59, timerSeconds: 30 });
+        const seen: unknown[] = [];
+        function ControlsConsumer() {
+            seen.push(use(TimerControlsContext).clock);
+            return null;
+        }
+        renderWithIntl(
+            <TimerContextProvider>
+                <TimerConsumer taskId='task-a' />
+                <ControlsConsumer />
+            </TimerContextProvider>,
+        );
+        expect(seen.at(-1)).toEqual({
+            kind: 'running',
+            taskId: 'task-a',
+            base: 30,
+            since: Date.parse('2026-05-27T11:59:00.000Z'),
+        });
+
+        fireEvent.click(screen.getByTestId('pause'));
+        expect(seen.at(-1)).toEqual({ kind: 'paused', taskId: 'task-a', seconds: 90 });
+    });
+
     it('checks in five minutes after the last check-in while running', async () => {
         authState.user = makeUser(RUNNING_SINCE_11_59);
         renderTimer();
@@ -424,15 +467,18 @@ describe('TimerContextProvider', () => {
             timerStartedAt: '2026-05-27T12:04:00.000Z',
             timerTaskId: 'task-a',
         };
-        expect(apiUpdateUser.mock.calls).toEqual([[first]]);
+        expect(apiUpdateUser.mock.calls).toEqual(written(first));
         expect(screen.getByTestId('seconds')).toHaveTextContent('300');
         expect(screen.getByTestId('isRunning')).toHaveTextContent('true');
 
         await advance(5 * 60_000);
-        expect(apiUpdateUser.mock.calls).toEqual([
-            [first],
-            [{ ...first, timerSeconds: 600, timerStartedAt: '2026-05-27T12:09:00.000Z' }],
-        ]);
+        expect(apiUpdateUser.mock.calls).toEqual(
+            written(first, {
+                ...first,
+                timerSeconds: 600,
+                timerStartedAt: '2026-05-27T12:09:00.000Z',
+            }),
+        );
     });
 
     it('checks in at once when the clock is already five minutes into its stretch', async () => {
@@ -443,15 +489,13 @@ describe('TimerContextProvider', () => {
         renderTimer();
 
         await advance(0);
-        expect(apiUpdateUser.mock.calls).toEqual([
-            [
-                {
-                    timerSeconds: 420,
-                    timerStartedAt: '2026-05-27T12:00:00.000Z',
-                    timerTaskId: 'task-a',
-                },
-            ],
-        ]);
+        expect(apiUpdateUser.mock.calls).toEqual(
+            written({
+                timerSeconds: 420,
+                timerStartedAt: '2026-05-27T12:00:00.000Z',
+                timerTaskId: 'task-a',
+            }),
+        );
         expect(screen.getByTestId('seconds')).toHaveTextContent('420');
         expect(screen.getByTestId('isRunning')).toHaveTextContent('true');
     });
@@ -506,15 +550,16 @@ describe('TimerContextProvider', () => {
         expect(apiGetUser).toHaveBeenCalledTimes(1);
 
         fireEvent.click(screen.getByTestId('pause'));
+        await advance(0);
         const paused = { timerSeconds: 300, timerStartedAt: '', timerTaskId: 'task-a' };
-        expect(apiUpdateUser.mock.calls).toEqual([[paused]]);
+        expect(apiUpdateUser.mock.calls).toEqual(written(paused));
 
         // The server answers with the copy from before the pause.
         await act(async () => {
             resolveFetch?.({ data: makeUser(RUNNING_SINCE_11_59) });
             await vi.advanceTimersByTimeAsync(0);
         });
-        expect(apiUpdateUser.mock.calls).toEqual([[paused]]);
+        expect(apiUpdateUser.mock.calls).toEqual(written(paused));
         expect(screen.getByTestId('isRunning')).toHaveTextContent('false');
         expect(screen.getByTestId('isPaused')).toHaveTextContent('true');
         expect(screen.getByTestId('seconds')).toHaveTextContent('300');
@@ -531,15 +576,13 @@ describe('TimerContextProvider', () => {
         expect(screen.getByTestId('seconds')).toHaveTextContent('300');
 
         await advance(5 * 60_000);
-        expect(apiUpdateUser.mock.calls).toEqual([
-            [
-                {
-                    timerSeconds: 600,
-                    timerStartedAt: '2026-05-27T12:09:00.000Z',
-                    timerTaskId: 'task-a',
-                },
-            ],
-        ]);
+        expect(apiUpdateUser.mock.calls).toEqual(
+            written({
+                timerSeconds: 600,
+                timerStartedAt: '2026-05-27T12:09:00.000Z',
+                timerTaskId: 'task-a',
+            }),
+        );
     });
 
     it('shows zero, not a negative count, for a start that is still ahead', () => {
@@ -557,7 +600,7 @@ describe('TimerContextProvider', () => {
         expect(screen.getByTestId('seconds').textContent).toBe('1');
     });
 
-    it('writes an expired running clock as paused on load', () => {
+    it('writes an expired running clock as paused on load', async () => {
         const startedAt = new Date('2026-05-27T11:49:00Z').toISOString();
         authState.user = makeUser({
             timerSeconds: 600,
@@ -565,16 +608,17 @@ describe('TimerContextProvider', () => {
             timerTaskId: 'task-a',
         });
         renderTimer();
+        await advance(0);
 
-        expect(apiUpdateUser.mock.calls).toEqual([
-            [{ timerSeconds: 600, timerStartedAt: '', timerTaskId: 'task-a' }],
-        ]);
+        expect(apiUpdateUser.mock.calls).toEqual(
+            written({ timerSeconds: 600, timerStartedAt: '', timerTaskId: 'task-a' }),
+        );
         expect(screen.getByTestId('isRunning')).toHaveTextContent('false');
         expect(screen.getByTestId('isPaused')).toHaveTextContent('true');
         expect(screen.getByTestId('seconds')).toHaveTextContent('600');
     });
 
-    it('repairs an expired clock once when the record arrives a second time', () => {
+    it('repairs an expired clock once when the record arrives a second time', async () => {
         const expired = {
             timerSeconds: 600,
             timerStartedAt: new Date('2026-05-27T11:49:00Z').toISOString(),
@@ -582,16 +626,167 @@ describe('TimerContextProvider', () => {
         };
         authState.user = makeUser(expired);
         renderTimer();
+        await advance(0);
         expect(apiUpdateUser).toHaveBeenCalledTimes(1);
 
         // A second GET of the user record lands after the repair with the stale running clock.
         act(() => {
             updateUserImpl(expired);
         });
+        await advance(0);
         expect(apiUpdateUser).toHaveBeenCalledTimes(1);
         expect(screen.getByTestId('isRunning')).toHaveTextContent('false');
         expect(screen.getByTestId('isPaused')).toHaveTextContent('true');
         expect(screen.getByTestId('seconds')).toHaveTextContent('600');
+    });
+
+    it('steps aside from the repair when a child starts the expired clock in the same commit', async () => {
+        authState.user = makeUser({
+            timerSeconds: 600,
+            timerStartedAt: new Date('2026-05-27T11:49:00Z').toISOString(),
+            timerTaskId: 'task-a',
+        });
+        function Opener() {
+            const { setClock, getClock } = use(TimerControlsContext);
+            useEffect(() => {
+                void setClock(start(getClock(), 'task-a', Date.now()));
+            }, [setClock, getClock]);
+            return null;
+        }
+        renderWithIntl(
+            <TimerContextProvider>
+                <TimerConsumer taskId='task-a' />
+                <Opener />
+            </TimerContextProvider>,
+        );
+        await advance(0);
+
+        expect(apiUpdateUser.mock.calls).toEqual(
+            written({
+                timerSeconds: 600,
+                timerStartedAt: '2026-05-27T12:00:00.000Z',
+                timerTaskId: 'task-a',
+            }),
+        );
+        expect(screen.getByTestId('isRunning')).toHaveTextContent('true');
+        expect(screen.getByTestId('seconds')).toHaveTextContent('600');
+    });
+
+    it('sends a write made during another after it, and keeps the newer clock when the older response lands', async () => {
+        authState.user = makeUser(RUNNING_SINCE_11_59);
+        const first = deferred<undefined>();
+        let sent = 0;
+        // The api applies the response through the auth context, and the response carries the
+        // record as the server held it after that write.
+        apiUpdateUser.mockImplementation((fields: Partial<User>) => {
+            sent += 1;
+            const gate = sent === 1 ? first.promise : Promise.resolve();
+            return gate.then(() => {
+                updateUserImpl(fields);
+                return { data: fields };
+            });
+        });
+        renderTimer('task-a');
+        fireEvent.click(screen.getByTestId('pause'));
+        fireEvent.click(screen.getByTestId('start'));
+        await advance(0);
+        const paused = { timerSeconds: 60, timerStartedAt: '', timerTaskId: 'task-a' };
+        const running = {
+            timerSeconds: 60,
+            timerStartedAt: '2026-05-27T12:00:00.000Z',
+            timerTaskId: 'task-a',
+        };
+        expect(apiUpdateUser.mock.calls).toEqual(written(paused));
+        expect(screen.getByTestId('isRunning')).toHaveTextContent('true');
+
+        await act(async () => {
+            first.resolve(undefined);
+            await vi.advanceTimersByTimeAsync(0);
+        });
+        expect(apiUpdateUser.mock.calls).toEqual(written(paused, running));
+        expect(screen.getByTestId('isRunning')).toHaveTextContent('true');
+        expect(screen.getByTestId('seconds')).toHaveTextContent('60');
+    });
+
+    it('resolves setClock once the write has reached the api', async () => {
+        const response = deferred<{ data: Partial<User> }>();
+        apiUpdateUser.mockImplementation(() => response.promise);
+        const controls = renderTimerWithControls();
+        let settled = false;
+        act(() => {
+            void controls.setClock({ kind: 'paused', taskId: 'task-a', seconds: 30 }).then(() => {
+                settled = true;
+            });
+        });
+        await advance(0);
+        expect(apiUpdateUser).toHaveBeenCalledTimes(1);
+        expect(settled).toBe(false);
+
+        await act(async () => {
+            response.resolve({ data: {} });
+            await vi.advanceTimersByTimeAsync(0);
+        });
+        expect(settled).toBe(true);
+    });
+
+    it('reconcile waits for a write in flight before it reads the record', async () => {
+        authState.user = makeUser(RUNNING_SINCE_11_59);
+        const first = deferred<{ data: Partial<User> }>();
+        apiUpdateUser.mockImplementationOnce(() => first.promise);
+        const controls = renderTimerWithControls('task-a');
+        fireEvent.click(screen.getByTestId('pause'));
+        await advance(0);
+        expect(apiUpdateUser).toHaveBeenCalledTimes(1);
+        act(() => {
+            void controls.reconcile();
+        });
+        await advance(0);
+        expect(apiGetUser).not.toHaveBeenCalled();
+
+        await act(async () => {
+            first.resolve({ data: { ...authState.user, timerSeconds: 60, timerStartedAt: '' } });
+            await vi.advanceTimersByTimeAsync(0);
+        });
+        expect(apiGetUser).toHaveBeenCalledTimes(1);
+    });
+
+    it('reconcile adopts the fetched record and returns its clock', async () => {
+        authState.user = makeUser(RUNNING_SINCE_11_59);
+        apiGetUser.mockResolvedValueOnce({
+            data: { ...authState.user, timerStartedAt: '', timerSeconds: 200 },
+        });
+        const controls = renderTimerWithControls();
+        let fetched: Clock | undefined;
+        await act(async () => {
+            fetched = await controls.reconcile();
+        });
+        expect(fetched).toEqual({ kind: 'paused', taskId: 'task-a', seconds: 200 });
+        expect(screen.getByTestId('isRunning')).toHaveTextContent('false');
+        expect(screen.getByTestId('seconds')).toHaveTextContent('200');
+        expect(apiUpdateUser).not.toHaveBeenCalled();
+    });
+
+    it('reconcile returns undefined and keeps the local clock when the member acted during the fetch', async () => {
+        authState.user = makeUser(RUNNING_SINCE_11_59);
+        const fetch = deferred<{ data: User }>();
+        apiGetUser.mockImplementationOnce(() => fetch.promise);
+        const controls = renderTimerWithControls('task-a');
+        let fetched: Clock | undefined = { kind: 'idle' };
+        act(() => {
+            void controls.reconcile().then((clock) => {
+                fetched = clock;
+            });
+        });
+        fireEvent.click(screen.getByTestId('pause'));
+
+        // The server answers with the copy from before the pause.
+        await act(async () => {
+            fetch.resolve({ data: makeUser(RUNNING_SINCE_11_59) });
+            await vi.advanceTimersByTimeAsync(0);
+        });
+        expect(fetched).toBeUndefined();
+        expect(screen.getByTestId('isPaused')).toHaveTextContent('true');
+        expect(screen.getByTestId('seconds')).toHaveTextContent('60');
     });
 
     it('updates document title while running and restores it when stopped', () => {

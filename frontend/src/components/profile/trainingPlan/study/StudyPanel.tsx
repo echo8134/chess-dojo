@@ -188,7 +188,8 @@ export function StudyPanel({
 function TimerButton({ taskId }: { taskId: string }) {
     const t = useTranslations('study.session');
     const timer = use(TimerContext);
-    const otherTask = timer.task && timer.task.id !== taskId;
+    const otherTask =
+        timer.clock.kind !== 'idle' && !!timer.clock.taskId && timer.clock.taskId !== taskId;
     const time = formatTime(timer.timerSeconds);
 
     if (otherTask) {

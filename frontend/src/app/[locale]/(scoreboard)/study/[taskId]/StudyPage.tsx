@@ -147,15 +147,19 @@ function StudyReadyView({ study }: { study: StudyReady }) {
     };
     // The hook marks the item as it was when Done was pressed, even if the member moves on
     // while the post or the count refresh is pending.
-    const mark = () => {
+    const mark = (opts?: { stop: boolean }) => {
         if (!session) return;
         markRequest.onStart();
-        session.markItemDone(current).then(() => markRequest.onSuccess(), markRequest.onFailure);
+        session
+            .markItemDone(current, opts)
+            .then(() => markRequest.onSuccess(), markRequest.onFailure);
     };
+    // Done ends the sitting on this game, so it stops the clock as well.
     const onMarkDone = () => {
-        if (!markRequest.isLoading()) mark();
+        if (!markRequest.isLoading()) mark({ stop: true });
     };
-    // An item already marked done gets no second post. The pane calls this once per board.
+    // An item already marked done gets no second post. The pane calls this once per board. The
+    // board marked it, not the member, so the clock runs on into the next puzzle.
     const onSolveComplete = () => {
         if (!isDone) mark();
     };

@@ -99,10 +99,6 @@ export function clear(): Clock {
     return { kind: 'idle' };
 }
 
-export function restart(taskId: string, seconds: number, now: number): Clock {
-    return { kind: 'running', taskId, base: seconds, since: now };
-}
-
 /** Banks the time so far and restamps `since`. An expired clock stops at its last check-in. */
 export function checkIn(clock: Clock, now: number): Clock {
     if (clock.kind !== 'running') {

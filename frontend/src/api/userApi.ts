@@ -10,6 +10,11 @@ import { TimelineEntry, TimelineStudyInfo } from '../database/timeline';
 import { User, UserSummary } from '../database/user';
 import { axiosService } from './axiosService';
 
+export interface UpdateUserOptions {
+    /** Sends the request so that it outlives the page, for a write made while the page unloads. */
+    keepalive?: boolean;
+}
+
 /**
  * UserApiContextType provides an API for interacting with the current signed-in user.
  */
@@ -69,9 +74,14 @@ export interface UserApiContextType {
      * updateUser applies the given updates to the current signed-in user.
      * @param update The updates to apply.
      * @param autopickCohort Whether to automatically pick a cohort for the user based on the rating system and username.
+     * @param options keepalive sends the request so that it outlives the page.
      * @returns An AxiosResponse containing the updated user in the data field.
      */
-    updateUser: (update: Partial<User>, autopickCohort?: boolean) => Promise<AxiosResponse<User>>;
+    updateUser: (
+        update: Partial<User>,
+        autopickCohort?: boolean,
+        options?: UpdateUserOptions,
+    ) => Promise<AxiosResponse<User>>;
 
     /**
      * resetUserProgress clears the current user's training plan progress.
@@ -380,6 +390,7 @@ export async function searchUsers(query: string, fields: string[], startKey?: st
  * @param update The updates to apply.
  * @param callback A callback function to invoke with the update after it has succeeded on the backend.
  * @param autopickCohort Whether to automatically pick a cohort for the user based on the rating system and username.
+ * @param options keepalive sends the request so that it outlives the page.
  * @returns An AxiosResponse containing the updated user in the data field.
  */
 export async function updateUser(
@@ -387,6 +398,7 @@ export async function updateUser(
     update: Partial<User>,
     callback: (update: Partial<User>) => void,
     autopickCohort?: boolean,
+    options?: UpdateUserOptions,
 ) {
     const result = await axiosService.put<User>(`/user`, update, {
         headers: {
@@ -396,6 +408,8 @@ export async function updateUser(
             autopickCohort,
         },
         functionName: 'updateUser',
+        // Only the fetch adapter can send a request that outlives the page.
+        ...(options?.keepalive ? { adapter: 'fetch', fetchOptions: { keepalive: true } } : {}),
     });
     callback(result.data);
     return result;
@@ -447,6 +461,16 @@ export interface UpdateUserProgressRequest {
 }
 
 /**
+ * The record without the work timer. GET /user is the channel that syncs the clock. A progress
+ * response holds the record as the server had it when it built the response, and applying its
+ * timer fields would undo a pause the member made during the post.
+ */
+function withoutClock(user: User): Partial<User> {
+    const { timerSeconds, timerStartedAt, timerTaskId, ...rest } = user;
+    return rest;
+}
+
+/**
  * updateUserProgress updates the current user's progress on the provided requirement.
  * @param idToken The id token of the current signed-in user.
  * @param request The request to update the progress.
@@ -471,7 +495,7 @@ export async function updateUserProgress(
             functionName: 'updateUserProgress',
         },
     );
-    callback(result.data.user);
+    callback(withoutClock(result.data.user));
     return result;
 }
 
@@ -504,7 +528,7 @@ export async function updateUserTimeline(
         },
         functionName: 'updateUserTimeline',
     });
-    callback(result.data);
+    callback(withoutClock(result.data));
     return result;
 }
 

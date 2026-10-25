@@ -1,3 +1,4 @@
+import { Clock } from '@/components/timer/clock';
 import { Timer, TimerContext } from '@/components/timer/TimerContext';
 import { Requirement } from '@/database/requirement';
 import { renderWithIntl } from '@/i18n/intl.test';
@@ -30,6 +31,7 @@ const book: StudyBook = {
 const timer = {
     isRunning: false,
     isPaused: false,
+    clock: { kind: 'idle' },
     timerSeconds: 0,
     onStart: vi.fn(),
     onPause: vi.fn(),
@@ -215,6 +217,8 @@ describe('StudyPanel in read mode', () => {
 });
 
 describe('StudyPanel timer', () => {
+    const onPolgarM3: Clock = { kind: 'running', taskId: 'polgar-m3', base: 0, since: 0 };
+
     it('names the task the timer is running on as the navbar timer does', () => {
         const polgarM3 = {
             id: 'polgar-m3',
@@ -222,8 +226,29 @@ describe('StudyPanel timer', () => {
             shortName: 'Polgar M3s',
             sortPriority: '0',
         } as Requirement;
-        renderPanel({}, { ...timer, isRunning: true, task: polgarM3 });
+        renderPanel({}, { ...timer, isRunning: true, clock: onPolgarM3, task: polgarM3 });
         expect(screen.getByText('The timer is running on Polgar M3s.')).toBeVisible();
         expect(screen.queryByTestId('study-pause-timer')).toBeNull();
+    });
+
+    it("keeps the other task's notice before that task has loaded", () => {
+        renderPanel({}, { ...timer, isRunning: true, clock: onPolgarM3 });
+        expect(screen.getByText(/^The timer is running on/)).toBeVisible();
+        expect(screen.queryByTestId('study-pause-timer')).toBeNull();
+        expect(screen.queryByTestId('study-start-timer')).toBeNull();
+    });
+
+    it('offers to pause a clock running without a task', () => {
+        const taskless: Clock = { kind: 'running', taskId: '', base: 0, since: 0 };
+        renderPanel({}, { ...timer, isRunning: true, clock: taskless, timerSeconds: 45 });
+        expect(screen.getByTestId('study-pause-timer')).toHaveTextContent('00:45');
+        expect(screen.queryByText(/^The timer is running on/)).toBeNull();
+    });
+
+    it('offers to resume a clock paused on this task', () => {
+        const onPolgar: Clock = { kind: 'paused', taskId: 'polgar', seconds: 90 };
+        renderPanel({}, { ...timer, clock: onPolgar, timerSeconds: 90 });
+        expect(screen.getByTestId('study-start-timer')).toHaveTextContent('01:30');
+        expect(screen.queryByText(/^The timer is running on/)).toBeNull();
     });
 });

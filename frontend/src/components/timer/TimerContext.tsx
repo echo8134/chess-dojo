@@ -16,7 +16,6 @@ import {
     elapsedSeconds,
     isExpired,
     pause,
-    restart,
     sameClock,
     start,
     toUserFields,
@@ -40,16 +39,19 @@ export interface TimerControls {
     onToggle: (taskId?: string) => void;
     onClear: () => void;
     /**
-     * Starts the timer for the task from the given seconds, zero by default, in one write. Logs
-     * nothing itself.
+     * The clock as this render's user record holds it. Changes only when the record's timer
+     * fields do.
      */
-    onRestart: (taskId: string, seconds?: number) => void;
-    /** Writes the clock as given, in one write. */
-    setClock: (next: Clock) => void;
+    clock: Clock;
+    /** Writes the clock as given, in one write. Resolves once the write has reached the server. */
+    setClock: (next: Clock) => Promise<void>;
     /** The clock as the latest user record holds it. */
     getClock: () => Clock;
-    /** The seconds on the clock at the moment of the call. */
-    getSeconds: () => number;
+    /**
+     * Adopts the server's record and returns its clock. Undefined when the fetch failed or the
+     * member acted while it was in flight.
+     */
+    reconcile: () => Promise<Clock | undefined>;
 }
 
 /** The details of the work timer, with the seconds that tick while it runs. */
@@ -76,7 +78,11 @@ export function TimerContextProvider({ children }: { children: ReactNode }) {
     const customTask = user?.customTasks?.find((ct) => ct.id === user.timerTaskId);
     const task = customTask || requirement;
 
-    const clock = clockFrom(user);
+    const { timerSeconds: seconds, timerStartedAt: startedAt, timerTaskId } = user ?? {};
+    const clock = useMemo(
+        () => clockFrom({ timerSeconds: seconds, timerStartedAt: startedAt, timerTaskId }),
+        [seconds, startedAt, timerTaskId],
+    );
     const expired = clock.kind === 'running' && isExpired(clock, now);
     const isRunning = clock.kind === 'running' && !expired;
     // An expired clock reads as paused until its repair lands, so the navbar does not flicker.
@@ -84,30 +90,66 @@ export function TimerContextProvider({ children }: { children: ReactNode }) {
     const timerSeconds = elapsedSeconds(clock, now);
     const since = clock.kind === 'running' ? clock.since : undefined;
 
-    // The ops keep one identity across renders and read the committed render here.
-    const latest = useRef({ clock, isRunning, task, api });
+    // The ops keep one identity across renders and read the committed render here. A write moves
+    // the clock ahead of its commit, and the ref keeps that clock until the commit catches up.
+    const latest = useRef({ clock, isRunning, task, api, dirty: false });
     useEffect(() => {
-        latest.current = { clock, isRunning, task, api };
+        const { clock: written, dirty } = latest.current;
+        latest.current = { clock: dirty ? written : clock, isRunning, task, api, dirty: false };
     });
 
+    // Writes go out one at a time, so the server applies them in the order they were made.
+    const chain = useRef<Promise<void>>(Promise.resolve());
+    const generation = useRef(0);
+    const lastWritten = useRef<Clock | undefined>(undefined);
     const ops = useMemo(() => {
         const getClock = () => latest.current.clock;
         const write = (next: Clock) => {
             const fields = toUserFields(next);
+            latest.current.clock = next;
+            latest.current.dirty = true;
+            lastWritten.current = next;
             setNow(Date.now());
             updateUser(fields);
-            void latest.current.api.updateUser(fields);
+            const gen = ++generation.current;
+            // The response applies the server's record, which can be older than a write made since.
+            // onDone puts that newer write back from its own copy, which no render touches.
+            const onDone = () => {
+                if (gen !== generation.current && lastWritten.current) {
+                    updateUser(toUserFields(lastWritten.current));
+                }
+            };
+            // The reader pauses the clock while the page unloads, so the write must outlive the page.
+            chain.current = chain.current
+                .then(() => latest.current.api.updateUser(fields, undefined, { keepalive: true }))
+                .then(onDone, () => undefined);
+            return chain.current;
         };
         const onOtherTask = (taskId?: string) => {
             const clock = getClock();
             return clock.kind !== 'idle' && !!clock.taskId && taskId !== clock.taskId;
         };
-        const onStart = (taskId?: string) => write(start(getClock(), taskId, Date.now()));
+        const onStart = (taskId?: string) => void write(start(getClock(), taskId, Date.now()));
         const onPause = (taskId?: string, openDialog?: boolean) => {
-            write(pause(getClock(), Date.now(), taskId));
+            void write(pause(getClock(), Date.now(), taskId));
             if (openDialog && latest.current.task) {
                 setShowTask(true);
             }
+        };
+        const reconcile = async () => {
+            const before = getClock();
+            // A copy read while this tab's own writes are in flight would be older than they are.
+            await chain.current;
+            const fetched = await latest.current.api.getUser().catch(() => undefined);
+            if (!fetched) {
+                return undefined;
+            }
+            // The member acted while the fetch was in flight. Their write wins over the fetched copy.
+            if (!sameClock(getClock(), before)) {
+                return undefined;
+            }
+            updateUser(fetched.data);
+            return clockFrom(fetched.data);
         };
         return {
             onStart,
@@ -119,32 +161,21 @@ export function TimerContextProvider({ children }: { children: ReactNode }) {
                     onStart(taskId);
                 }
             },
-            onClear: () => write(clear()),
-            onRestart: (taskId: string, seconds = 0) => write(restart(taskId, seconds, Date.now())),
+            onClear: () => void write(clear()),
             setClock: write,
             getClock,
-            getSeconds: () => elapsedSeconds(getClock(), Date.now()),
+            reconcile,
         };
     }, [updateUser]);
 
     // Banks the stretch so far, after adopting the server's copy. Otherwise this tab would write
     // "running" over a pause, clear or task switch made in another tab.
     const renew = useCallback(async () => {
-        const before = ops.getClock();
-        const fetched = await latest.current.api.getUser().catch(() => undefined);
-        if (!fetched) {
-            return;
+        const clock = await ops.reconcile();
+        if (clock?.kind === 'running') {
+            void ops.setClock(checkIn(clock, Date.now()));
         }
-        // The member acted while the fetch was in flight. Their write wins over the fetched copy.
-        if (!sameClock(ops.getClock(), before)) {
-            return;
-        }
-        updateUser(fetched.data);
-        const clock = clockFrom(fetched.data);
-        if (clock.kind === 'running') {
-            ops.setClock(checkIn(clock, Date.now()));
-        }
-    }, [ops, updateUser]);
+    }, [ops]);
 
     // The first sample runs at once, so a running record that arrives from a fetch does not render
     // with the last tick's time.
@@ -192,12 +223,17 @@ export function TimerContextProvider({ children }: { children: ReactNode }) {
             return;
         }
         repaired.current = since;
-        ops.setClock(checkIn(ops.getClock(), Date.now()));
+        // A child's effect in this commit may have started the clock already.
+        const current = ops.getClock();
+        if (current.kind !== 'running' || !isExpired(current, Date.now())) {
+            return;
+        }
+        void ops.setClock(checkIn(current, Date.now()));
     }, [expired, since, ops]);
 
     const controls = useMemo<TimerControls>(
-        () => ({ ...ops, isRunning, isPaused, task, showTask, setShowTask }),
-        [ops, isRunning, isPaused, task, showTask],
+        () => ({ ...ops, clock, isRunning, isPaused, task, showTask, setShowTask }),
+        [ops, clock, isRunning, isPaused, task, showTask],
     );
     // Consumers call this while rendering, so it reads this render rather than the ops' committed one.
     const held = clock.kind === 'idle' ? '' : clock.taskId;

@@ -61,10 +61,11 @@ vi.mock('@/board/pgn/PgnBoard', async () => {
     }
     return { useChess: () => ({ chess }), default: PgnBoardMock };
 });
+// The solve board reports a solved puzzle through a button, so the test can finish one.
 vi.mock('@/components/profile/trainingPlan/study/SolveBoard', () => ({
-    SolveBoard: ({ pgn }: { pgn: string }) => {
+    SolveBoard: ({ pgn, onComplete }: { pgn: string; onComplete: () => void }) => {
         mocks.solvePgn(pgn);
-        return null;
+        return <button data-testid='solve-complete' onClick={onComplete} />;
     },
 }));
 vi.mock('@/board/pgn/pgnText/PgnText', () => ({
@@ -128,6 +129,7 @@ const idle: Request = {
 const timer = {
     isRunning: false,
     isPaused: false,
+    clock: { kind: 'idle' },
     timerSeconds: 0,
     onStart: vi.fn(),
     onPause: vi.fn(),
@@ -135,8 +137,8 @@ const timer = {
 // The layout reads breakpoints and the colour scheme from the theme.
 const theme = createTheme({ cssVariables: true, colorSchemes: { light: true, dark: true } });
 
-/** A ready study on the first of two items in read mode, with a session mapped as given. */
-function readyOn(mapping: BookMapping) {
+/** A ready study on the first of two items, with the given mapping, in read mode unless a mode is passed. */
+function readyOn(mapping: BookMapping, mode: StudyMode = { kind: 'read' }) {
     const session = {
         task: { id: 'task-1', name: 'Polgar', counts: { '1500-1600': 10 }, startCount: 0 },
         cohort: '1500-1600',
@@ -161,10 +163,10 @@ function readyOn(mapping: BookMapping) {
         onBoardUnsaved: vi.fn(),
         copyRequest: idle,
         board: {
-            key: 'k1:read',
+            key: `k1:${mode.kind}`,
             pgn: '',
             latestPgn: () => '',
-            mode: { kind: 'read' },
+            mode,
             orientation: 'white',
             context: {},
             disableExport: true,
@@ -290,9 +292,32 @@ describe('StudyPage: Done in read mode', () => {
         const done = await screen.findByTestId('study-mark-done');
         fireEvent.click(done);
         fireEvent.click(done);
-        await waitFor(() => expect(session.markItemDone).toHaveBeenCalledWith(first));
-        expect(session.markItemDone).toHaveBeenCalledTimes(1);
+        await waitFor(() => expect(session.markItemDone).toHaveBeenCalledTimes(1));
+        expect(vi.mocked(session.markItemDone).mock.calls).toEqual([[first, { stop: true }]]);
         expect(screen.queryByRole('dialog')).toBeNull();
+    });
+});
+
+describe('StudyPage: a puzzle the board solves', () => {
+    beforeEach(() => {
+        mocks.searchParams = new URLSearchParams();
+        mocks.useStudy.mockReset();
+    });
+
+    afterEach(() => {
+        cleanup();
+    });
+
+    it('marks the item without stopping the clock, once', async () => {
+        const session = readyOn(
+            { mapped: true, startCount: 0, unit: 'problems' },
+            { kind: 'solve', playBothSides: false },
+        );
+        const solved = await screen.findByTestId('solve-complete');
+        fireEvent.click(solved);
+        fireEvent.click(solved);
+        await waitFor(() => expect(session.markItemDone).toHaveBeenCalledTimes(1));
+        expect(vi.mocked(session.markItemDone).mock.calls).toEqual([[first, undefined]]);
     });
 });
 

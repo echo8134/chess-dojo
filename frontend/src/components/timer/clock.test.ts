@@ -7,7 +7,6 @@ import {
     elapsedSeconds,
     isExpired,
     pause,
-    restart,
     sameClock,
     start,
     toUserFields,
@@ -205,14 +204,9 @@ describe('pause', () => {
     });
 });
 
-describe('clear and restart', () => {
+describe('clear', () => {
     it('clears to idle', () => {
         expect(clear()).toEqual({ kind: 'idle' });
-    });
-
-    it('restarts a task running from the given seconds', () => {
-        expect(restart('task-a', 59, NOW)).toEqual(running('task-a', 59, NOW));
-        expect(restart('task-a', 0, NOW)).toEqual(running('task-a', 0, NOW));
     });
 });
 

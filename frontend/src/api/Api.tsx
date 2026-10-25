@@ -186,6 +186,7 @@ import {
     submitResultsForOpenClassical,
 } from './tournamentApi';
 import {
+    UpdateUserOptions,
     UpdateUserProgressRequest,
     UpdateUserTimelineRequest,
     UserApiContextType,
@@ -266,8 +267,11 @@ export function ApiProvider({ children }: { children: ReactNode }) {
             listUsersByCohort: (cohort: string, startKey?: string) =>
                 listUsersByCohort(idToken, cohort, startKey),
             searchUsers,
-            updateUser: (update: Partial<User>, autopickCohort?: boolean) =>
-                updateUser(idToken, update, auth.updateUser, autopickCohort),
+            updateUser: (
+                update: Partial<User>,
+                autopickCohort?: boolean,
+                options?: UpdateUserOptions,
+            ) => updateUser(idToken, update, auth.updateUser, autopickCohort, options),
             resetUserProgress: (confirm: string) =>
                 resetUserProgress(idToken, confirm, auth.updateUser),
             updateUserProgress: (request: UpdateUserProgressRequest) =>

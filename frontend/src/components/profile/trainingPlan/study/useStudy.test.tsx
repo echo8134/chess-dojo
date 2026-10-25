@@ -1,5 +1,6 @@
 import { UpdateUserProgressRequest, UpdateUserTimelineRequest } from '@/api/userApi';
 import { BoardApi } from '@/board/Board';
+import { Clock, clockFrom, isExpired, toUserFields } from '@/components/timer/clock';
 import { TimerControls, TimerControlsContext } from '@/components/timer/TimerContext';
 import { Course, CourseModuleType, CourseType } from '@/database/course';
 import { Game } from '@/database/game';
@@ -27,6 +28,14 @@ const KEY_B = 'course:STUDY/study-1/m2/0';
 /** 18:00 UTC on the 24th. The hook reads the clock through luxon, so Settings pins it. */
 const NOW_ISO = '2026-10-24T18:00:00.000Z';
 const NOW = DateTime.fromISO(NOW_ISO, { zone: 'utc' });
+const NOW_MS = NOW.toMillis();
+const running = (taskId: string, base: number, since = NOW_MS): Clock => ({
+    kind: 'running',
+    taskId,
+    base,
+    since,
+});
+const paused = (taskId: string, seconds: number): Clock => ({ kind: 'paused', taskId, seconds });
 /** An item as a loaded entry carries it, named by its key, with no minutes. */
 const studied = (key: string) => ({ key, name: key, minutes: 0, at: NOW_ISO });
 
@@ -186,6 +195,8 @@ const mocks = vi.hoisted(() => ({
         progress: {},
         customTasks: [],
         timerTaskId: '',
+        timerSeconds: 0,
+        timerStartedAt: '',
     },
     // When set, every render gets a new api object, as the real provider does after a user update.
     freshApi: false,
@@ -217,16 +228,27 @@ vi.mock('@/hooks/useNextSearchParams', () => ({
     }),
 }));
 
-let timerSeconds = 0;
+/** The controls over the mocked user record, the way the provider sits over the real one. */
+const setClock = vi.fn((next: Clock) => {
+    mocks.user = { ...mocks.user, ...toUserFields(next) };
+    return Promise.resolve();
+});
 const timer = {
-    isRunning: false,
+    get clock() {
+        return clockFrom(mocks.user);
+    },
+    get isRunning() {
+        const clock = clockFrom(mocks.user);
+        return clock.kind === 'running' && !isExpired(clock, Date.now());
+    },
     isPaused: false,
     task: undefined,
     onStart: vi.fn(),
     onPause: vi.fn(),
     onClear: vi.fn(),
-    onRestart: vi.fn(),
-    getSeconds: () => timerSeconds,
+    setClock,
+    getClock: () => clockFrom(mocks.user),
+    reconcile: () => Promise.resolve(clockFrom(mocks.user)),
 } as unknown as TimerControls;
 
 const wrapper = ({ children }: { children: ReactNode }) => (
@@ -271,6 +293,8 @@ beforeEach(() => {
         progress: {},
         customTasks: [],
         timerTaskId: '',
+        timerSeconds: 0,
+        timerStartedAt: '',
     };
     mocks.api.getUser.mockResolvedValue({ data: mocks.user });
     mocks.api.getCourse.mockImplementation((_type: string, id: string) =>
@@ -286,16 +310,17 @@ beforeEach(() => {
     mocks.api.updateUserTimeline.mockResolvedValue({ data: mocks.user });
     (timer.onStart as ReturnType<typeof vi.fn>).mockReset();
     (timer.onClear as ReturnType<typeof vi.fn>).mockReset();
-    (timer.onRestart as ReturnType<typeof vi.fn>).mockReset();
-    timerSeconds = 0;
-    timer.task = undefined;
+    setClock.mockClear();
     mocks.freshApi = false;
-    Settings.now = () => NOW.toMillis();
+    // The hook stamps the clock with Date.now(), and the hook's dates go through luxon.
+    vi.setSystemTime(NOW_MS);
+    Settings.now = () => NOW_MS;
     Settings.defaultZone = 'utc';
 });
 
 afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
     Settings.now = () => Date.now();
     Settings.defaultZone = 'system';
 });
@@ -332,23 +357,23 @@ describe('useStudy: book, current item and done marks', () => {
     });
 
     it('starts the timer on the task when it is idle, once', async () => {
-        await ready();
-        expect(timer.onStart).toHaveBeenCalledTimes(1);
-        expect(timer.onStart).toHaveBeenCalledWith('task-1');
+        const { study, rerender } = await ready();
+        rerender();
+        expect(setClock.mock.calls).toEqual([[running('task-1', 0)]]);
+        expect(study().session?.timer).toEqual({ kind: 'attached', pausedBy: 'nobody' });
     });
 
-    it("leaves a paused timer on another task alone before that task loads, and resumes the task's own", async () => {
-        // The timer's own task has not loaded, so the context names no task.
-        timerSeconds = 1500;
-        mocks.user = { ...mocks.user, timerTaskId: 'polgar' };
+    it("leaves a paused timer on another task alone, and resumes the task's own", async () => {
+        mocks.user = { ...mocks.user, ...toUserFields(paused('polgar', 1500)) };
         const other = await ready();
-        expect(timer.onStart).not.toHaveBeenCalled();
+        expect(other.study().session?.timer).toEqual({ kind: 'foreign' });
         other.unmount();
+        expect(setClock).not.toHaveBeenCalled();
+        expect(clockFrom(mocks.user)).toEqual(paused('polgar', 1500));
 
         mocks.user = { ...mocks.user, timerTaskId: 'task-1' };
         await ready();
-        expect(timer.onStart).toHaveBeenCalledTimes(1);
-        expect(timer.onStart).toHaveBeenCalledWith('task-1');
+        expect(setClock.mock.calls).toEqual([[running('task-1', 1500)]]);
     });
 
     it('keeps the book and the board when the api object is rebuilt', async () => {
@@ -458,7 +483,7 @@ describe('useStudy: browsing a course without a task', () => {
         expect(study().current.key).toBe(KEY_A);
         expect(mocks.api.getCourse).toHaveBeenCalledWith('STUDY', 'study-1');
         expect(mocks.api.listUserTimeline).not.toHaveBeenCalled();
-        expect(timer.onStart).not.toHaveBeenCalled();
+        expect(setClock).not.toHaveBeenCalled();
     });
 
     it('still finds the working copies', async () => {
@@ -886,7 +911,7 @@ describe('useStudy: a workbook read as one book, sliced to the cohort', () => {
         expect(study().session).toBeUndefined();
         expect(names(study)).toEqual(['Problem 7', 'Problem 8']);
         expect(mocks.api.listUserTimeline).not.toHaveBeenCalled();
-        expect(timer.onStart).not.toHaveBeenCalled();
+        expect(setClock).not.toHaveBeenCalled();
     });
 
     it('leaves a set task exactly as before', async () => {
@@ -1144,11 +1169,10 @@ describe('useStudy: marking an item without the dialog', () => {
     };
 
     it('posts one count up with the mark and the timer minutes, and keeps the mark', async () => {
-        mocks.user = { ...mocks.user, timerTaskId: 'polgar' };
+        mocks.user = { ...mocks.user, ...toUserFields(running('polgar', 479)) };
         const fresh = { ...mocks.user, progress: { polgar: progressAt(10) } };
         mocks.api.getUser.mockResolvedValue({ data: fresh });
         mocks.api.updateUserProgress.mockImplementation(answer);
-        timerSeconds = 7 * 60 + 59;
         const { study } = await ready(null, POLGAR_SOURCE);
         const item = study().current;
         expect(study().session?.done.has(item.key)).toBe(false);
@@ -1168,9 +1192,8 @@ describe('useStudy: marking an item without the dialog', () => {
         });
         expect(study().session?.done.has(item.key)).toBe(true);
         expect(study().session?.canUndo).toBe(true);
-        // The 59 seconds the post did not count carry over to the next item.
-        expect(timer.onRestart).toHaveBeenCalledTimes(1);
-        expect(timer.onRestart).toHaveBeenCalledWith('polgar', 59);
+        // The 59 seconds the post did not count carry over to the next item, still running.
+        expect(setClock.mock.calls).toEqual([[running('polgar', 59)]]);
         expect(mocks.trackEvent).toHaveBeenCalledWith('update_progress', {
             requirement_id: 'polgar',
             requirement_name: 'Solve Polgar M2s through Problem {{count}}',
@@ -1182,14 +1205,161 @@ describe('useStudy: marking an item without the dialog', () => {
         });
     });
 
-    it('grows the day entry with a second mark, posting the edited entry and progress', async () => {
-        mocks.user = { ...mocks.user, timerTaskId: 'polgar' };
+    it('posts the paused minutes of a clock the member paused before Done, and Next starts it', async () => {
+        mocks.user = { ...mocks.user, ...toUserFields(running('polgar', 479)) };
         liveServer();
-        timerSeconds = 7 * 60;
+        const { study, rerender } = await ready(null, POLGAR_SOURCE);
+        expect(setClock).not.toHaveBeenCalled();
+        // The member pauses through a control, and the change reaches the hook as a clock change.
+        mocks.user = { ...mocks.user, ...toUserFields(paused('polgar', 125)) };
+        const item = study().current;
+        const next = study().book.chapters[0].items.find((i) => i.key !== item.key);
+        if (!next) throw new Error('the fixture needs a second item');
+        await act(() => study().session?.markItemDone(item, { stop: true }));
+        expect(mocks.api.updateUserProgress.mock.calls[0][0]).toMatchObject({
+            incrementalMinutesSpent: 2,
+            studyInfo: { items: [{ key: item.key, minutes: 2 }] },
+        });
+        expect(setClock.mock.calls).toEqual([[paused('polgar', 5)]]);
+        expect(study().session?.timer).toEqual({ kind: 'attached', pausedBy: 'done' });
+
+        act(() => {
+            study().select(next);
+        });
+        await waitFor(() =>
+            expect(setClock.mock.calls).toEqual([[paused('polgar', 5)], [running('polgar', 5)]]),
+        );
+        rerender();
+        expect(study().session?.timer).toEqual({ kind: 'attached', pausedBy: 'nobody' });
+    });
+
+    it('stops the clock with Done and leaves it running after a solve', async () => {
+        mocks.user = { ...mocks.user, ...toUserFields(running('polgar', 479)) };
+        liveServer();
         const { study } = await ready(null, POLGAR_SOURCE);
         const [first, second] = study().book.chapters[0].items;
         await act(() => study().session?.markItemDone(first));
-        timerSeconds = 5 * 60 + 30;
+        expect(setClock.mock.calls).toEqual([[running('polgar', 59)]]);
+        expect(study().session?.timer).toEqual({ kind: 'attached', pausedBy: 'nobody' });
+
+        mocks.user = { ...mocks.user, ...toUserFields(running('polgar', 130)) };
+        await act(() => study().session?.markItemDone(second, { stop: true }));
+        expect(mocks.api.updateUserTimeline.mock.calls[0][0]).toMatchObject({
+            updated: [
+                {
+                    studyInfo: {
+                        items: [
+                            { key: first.key, minutes: 7 },
+                            { key: second.key, minutes: 2 },
+                        ],
+                    },
+                },
+            ],
+        });
+        expect(setClock.mock.calls).toEqual([[running('polgar', 59)], [paused('polgar', 10)]]);
+        expect(study().session?.timer).toEqual({ kind: 'attached', pausedBy: 'done' });
+    });
+
+    it('starts a clock that Done stopped when another item opens, and leaves a member pause alone', async () => {
+        mocks.user = { ...mocks.user, ...toUserFields(running('polgar', 479)) };
+        liveServer();
+        const { study, rerender } = await ready(null, POLGAR_SOURCE);
+        const [first, second, third] = study().book.chapters[0].items;
+        await act(() => study().session?.markItemDone(first, { stop: true }));
+        expect(setClock.mock.calls).toEqual([[paused('polgar', 59)]]);
+
+        act(() => {
+            study().select(second);
+        });
+        await waitFor(() => expect(study().current.key).toBe(second.key));
+        await waitFor(() =>
+            expect(setClock.mock.calls).toEqual([[paused('polgar', 59)], [running('polgar', 59)]]),
+        );
+        rerender();
+        expect(study().session?.timer).toEqual({ kind: 'attached', pausedBy: 'nobody' });
+
+        // The member pauses from the footer and browses on. The pause is theirs to lift.
+        mocks.user = { ...mocks.user, ...toUserFields(paused('polgar', 80)) };
+        act(() => {
+            study().select(third);
+        });
+        await waitFor(() => expect(study().current.key).toBe(third.key));
+        expect(setClock.mock.calls).toEqual([[paused('polgar', 59)], [running('polgar', 59)]]);
+        expect(clockFrom(mocks.user)).toEqual(paused('polgar', 80));
+        expect(study().session?.timer).toEqual({ kind: 'attached', pausedBy: 'member' });
+    });
+
+    it('waits for the stop of a Done still posting before the next item starts the clock', async () => {
+        mocks.user = { ...mocks.user, ...toUserFields(running('polgar', 479)) };
+        liveServer();
+        const release = deferred<undefined>();
+        mocks.api.updateUserProgress.mockImplementation((posted: UpdateUserProgressRequest) =>
+            release.promise.then(() => answer(posted)),
+        );
+        const { study, rerender } = await ready(null, POLGAR_SOURCE);
+        const [first, second] = study().book.chapters[0].items;
+        let marked = false;
+        act(() => {
+            void study()
+                .session?.markItemDone(first, { stop: true })
+                .then(() => (marked = true));
+        });
+        await waitFor(() => expect(mocks.api.updateUserProgress).toHaveBeenCalledTimes(1));
+        act(() => {
+            study().select(second);
+        });
+        await waitFor(() => expect(study().current.key).toBe(second.key));
+        expect(setClock).not.toHaveBeenCalled();
+
+        act(() => release.resolve(undefined));
+        await waitFor(() => expect(marked).toBe(true));
+        await waitFor(() =>
+            expect(setClock.mock.calls).toEqual([[paused('polgar', 59)], [running('polgar', 59)]]),
+        );
+        rerender();
+        expect(study().session?.timer).toEqual({ kind: 'attached', pausedBy: 'nobody' });
+    });
+
+    it('starts a clock that Done stopped once Undo has posted, not before', async () => {
+        mocks.user = { ...mocks.user, ...toUserFields(running('polgar', 479)) };
+        liveServer();
+        const release = deferred<undefined>();
+        mocks.api.updateUserTimeline.mockImplementation((req: UpdateUserTimelineRequest) =>
+            release.promise.then(() => ({
+                data: { ...mocks.user, progress: { polgar: req.progress } },
+            })),
+        );
+        const { study, rerender } = await ready(null, POLGAR_SOURCE);
+        const item = study().current;
+        await act(() => study().session?.markItemDone(item, { stop: true }));
+        expect(setClock.mock.calls).toEqual([[paused('polgar', 59)]]);
+
+        let undone = false;
+        act(() => {
+            void study()
+                .session?.undoMark(item.key)
+                .then(() => (undone = true));
+        });
+        await waitFor(() => expect(mocks.api.updateUserTimeline).toHaveBeenCalledTimes(1));
+        await act(() => Promise.resolve());
+        expect(setClock.mock.calls).toEqual([[paused('polgar', 59)]]);
+        expect(undone).toBe(false);
+
+        act(() => release.resolve(undefined));
+        await waitFor(() => expect(undone).toBe(true));
+        expect(setClock.mock.calls).toEqual([[paused('polgar', 59)], [running('polgar', 59)]]);
+        expect(study().session?.done.has(item.key)).toBe(false);
+        rerender();
+        expect(study().session?.timer).toEqual({ kind: 'attached', pausedBy: 'nobody' });
+    });
+
+    it('grows the day entry with a second mark, posting the edited entry and progress', async () => {
+        mocks.user = { ...mocks.user, ...toUserFields(running('polgar', 420)) };
+        liveServer();
+        const { study } = await ready(null, POLGAR_SOURCE);
+        const [first, second] = study().book.chapters[0].items;
+        await act(() => study().session?.markItemDone(first));
+        mocks.user = { ...mocks.user, ...toUserFields(running('polgar', 330)) };
         await act(() => study().session?.markItemDone(second));
 
         expect(mocks.api.updateUserProgress).toHaveBeenCalledTimes(1);
@@ -1228,7 +1398,7 @@ describe('useStudy: marking an item without the dialog', () => {
         });
         expect(study().session?.done.has(first.key)).toBe(true);
         expect(study().session?.done.has(second.key)).toBe(true);
-        expect(timer.onRestart).toHaveBeenLastCalledWith('polgar', 30);
+        expect(setClock).toHaveBeenLastCalledWith(running('polgar', 30));
         expect(mocks.trackEvent).toHaveBeenCalledTimes(2);
     });
 
@@ -1357,11 +1527,12 @@ describe('useStudy: marking an item without the dialog', () => {
     });
 
     it('posts a queued mark with the minutes since the mark before it', async () => {
+        mocks.user = { ...mocks.user, ...toUserFields(running('polgar', 600)) };
         let stored = progressAt(10);
         const read = () =>
             Promise.resolve({ data: { ...mocks.user, progress: { polgar: stored } } });
         // The second count refresh answers the way the network does, after the first mark's
-        // timer restart.
+        // clock write.
         const refresh = deferred<undefined>();
         mocks.api.getUser
             .mockImplementationOnce(read)
@@ -1374,22 +1545,14 @@ describe('useStudy: marking an item without the dialog', () => {
                 ? release.promise.then(() => response)
                 : response;
         });
-        // A mark reads the clock when it runs, so it sees the restart the previous mark wrote.
-        let seconds = 600;
-        const live: TimerControls = {
-            ...timer,
-            getSeconds: () => seconds,
-            onRestart: (_taskId: string, from = 0) => {
-                seconds = from;
-            },
-        };
-        const rendered = renderHook(() => useStudy(POLGAR_SOURCE, null), {
-            wrapper: ({ children }) => (
-                <TimerControlsContext.Provider value={live}>
-                    {children}
-                </TimerControlsContext.Provider>
-            ),
+        // The first mark's clock write lands when the test says so.
+        const written = deferred<undefined>();
+        setClock.mockImplementationOnce((next: Clock) => {
+            mocks.user = { ...mocks.user, ...toUserFields(next) };
+            return written.promise;
         });
+        // A mark reads the record when it runs, so it sees the clock the previous mark wrote.
+        const rendered = renderHook(() => useStudy(POLGAR_SOURCE, null), { wrapper });
         await waitFor(() => expect(rendered.result.current.status).toBe('ready'));
         const study = () => rendered.result.current as StudyReady;
         const [first, second] = study().book.chapters[0].items;
@@ -1405,6 +1568,11 @@ describe('useStudy: marking an item without the dialog', () => {
                 .then(() => (secondSettled = true));
         });
         act(() => release.resolve(undefined));
+        await waitFor(() => expect(setClock).toHaveBeenCalledTimes(1));
+        await act(() => Promise.resolve());
+        // The second mark reads the record only after the first mark's clock write landed.
+        expect(mocks.api.getUser).toHaveBeenCalledTimes(1);
+        act(() => written.resolve(undefined));
         await waitFor(() => expect(mocks.api.getUser).toHaveBeenCalledTimes(2));
         act(() => refresh.resolve(undefined));
         await waitFor(() => expect(secondSettled).toBe(true));
@@ -1425,17 +1593,18 @@ describe('useStudy: marking an item without the dialog', () => {
 
     it('counts no minutes and leaves the timer alone when it runs on another task', async () => {
         mocks.api.updateUserProgress.mockImplementation(answer);
-        timerSeconds = 600;
-        // The timer's own task has not loaded, so the context names no task.
-        mocks.user = { ...mocks.user, timerTaskId: 'task-1' };
+        mocks.user = { ...mocks.user, ...toUserFields(running('task-1', 600)) };
+        mocks.api.getUser.mockResolvedValue({ data: mocks.user });
         const { study } = await ready(null, POLGAR_SOURCE);
+        expect(study().session?.timer).toEqual({ kind: 'foreign' });
         await act(() => study().session?.markItemDone(study().current));
         expect(mocks.api.updateUserProgress.mock.calls[0][0]).toMatchObject({
             previousCount: 6,
             newCount: 7,
             incrementalMinutesSpent: 0,
         });
-        expect(timer.onRestart).not.toHaveBeenCalled();
+        expect(setClock).not.toHaveBeenCalled();
+        expect(clockFrom(mocks.user)).toEqual(running('task-1', 600));
     });
 
     it('never lowers a count that is already past the target', async () => {
@@ -1498,14 +1667,13 @@ describe('useStudy: marking an item without the dialog', () => {
     });
 
     it('undoes the only mark of the day into a time-only entry, keeping its minutes', async () => {
-        mocks.user = { ...mocks.user, timerTaskId: 'polgar' };
+        mocks.user = { ...mocks.user, ...toUserFields(running('polgar', 420)) };
         liveServer();
-        timerSeconds = 7 * 60;
         const { study } = await ready(null, POLGAR_SOURCE);
         const item = study().current;
         await act(() => study().session?.markItemDone(item));
         expect(study().session?.done.has(item.key)).toBe(true);
-        (timer.onRestart as ReturnType<typeof vi.fn>).mockReset();
+        setClock.mockClear();
 
         await act(() => study().session?.undoMark(item.key));
         expect(mocks.api.updateUserTimeline).toHaveBeenCalledTimes(1);
@@ -1537,22 +1705,21 @@ describe('useStudy: marking an item without the dialog', () => {
         });
         const [undo] = mocks.api.updateUserTimeline.mock.calls[0] as [UpdateUserTimelineRequest];
         expect(undo.updated[0]).not.toHaveProperty('studyInfo');
-        expect(timer.onRestart).not.toHaveBeenCalled();
+        expect(setClock).not.toHaveBeenCalled();
         expect(timer.onClear).not.toHaveBeenCalled();
         expect(study().session?.done.has(item.key)).toBe(false);
         expect(study().session?.canUndo).toBe(false);
     });
 
     it('undoes the second mark out of the entry, counting down and keeping both minutes', async () => {
-        mocks.user = { ...mocks.user, timerTaskId: 'polgar' };
+        mocks.user = { ...mocks.user, ...toUserFields(running('polgar', 420)) };
         liveServer();
-        timerSeconds = 7 * 60;
         const { study } = await ready(null, POLGAR_SOURCE);
         const [first, second] = study().book.chapters[0].items;
         await act(() => study().session?.markItemDone(first));
-        timerSeconds = 5 * 60;
+        mocks.user = { ...mocks.user, ...toUserFields(running('polgar', 300)) };
         await act(() => study().session?.markItemDone(second));
-        (timer.onRestart as ReturnType<typeof vi.fn>).mockReset();
+        setClock.mockClear();
 
         await act(() => study().session?.undoMark(second.key));
         expect(mocks.api.updateUserTimeline).toHaveBeenCalledTimes(2);
@@ -1585,7 +1752,7 @@ describe('useStudy: marking an item without the dialog', () => {
             ],
             deleted: [],
         });
-        expect(timer.onRestart).not.toHaveBeenCalled();
+        expect(setClock).not.toHaveBeenCalled();
         expect(timer.onClear).not.toHaveBeenCalled();
         expect(study().session?.done.has(first.key)).toBe(true);
         expect(study().session?.done.has(second.key)).toBe(false);

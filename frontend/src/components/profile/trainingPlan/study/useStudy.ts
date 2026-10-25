@@ -5,7 +5,6 @@ import { isGame } from '@/api/gameApi';
 import { Request, useRequest } from '@/api/Request';
 import { AuthStatus, useAuth } from '@/auth/Auth';
 import { BoardApi } from '@/board/Board';
-import { TimerControlsContext } from '@/components/timer/TimerContext';
 import { GameContextType } from '@/context/useGame';
 import { Course } from '@/database/course';
 import { Game, GameKey } from '@/database/game';
@@ -22,7 +21,7 @@ import { useNextSearchParams } from '@/hooks/useNextSearchParams';
 import { Chess, Event, EventType } from '@jackstenglein/chess';
 import { GameImportTypes } from '@jackstenglein/chess-dojo-common/src/database/game';
 import { DateTime } from 'luxon';
-import { MutableRefObject, use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { MutableRefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     CanonicalItem,
     concatBooks,
@@ -51,6 +50,8 @@ import {
     taskCohort,
     taskTitle,
 } from './selectors';
+import { Session } from './timerSession';
+import { useTimerSession } from './useTimerSession';
 
 export type { StudyMode } from './selectors';
 
@@ -82,16 +83,20 @@ export interface StudySessionState {
     mapping: BookMapping;
     done: Set<string>;
     historyComplete: boolean;
+    /** The reader's hold on the work timer. */
+    timer: Session;
     /**
      * Posts the item as done with the timer's minutes. The count rises by one when the item is
      * the unit and stays where it is otherwise. The day's first mark creates the entry and later
-     * marks grow it, so a sitting is one card in the feed.
+     * marks grow it, so a sitting is one card in the feed. With `stop`, as from the Done button,
+     * the clock stops with the remainder until another game of the task opens. A solve the board
+     * marks leaves it running.
      */
-    markItemDone: (item: StudyItem) => Promise<void>;
+    markItemDone: (item: StudyItem, opts?: { stop?: boolean }) => Promise<void>;
     /**
      * Reverts the last mark when it is the given item's, by taking the item out of its entry
-     * and counting the progress back down. The minutes stay logged. Does nothing once a later
-     * mark has replaced it.
+     * and counting the progress back down. The minutes stay logged, and a clock that Done
+     * stopped starts again. Does nothing once a later mark has replaced it.
      */
     undoMark: (itemKey: string) => Promise<void>;
     /** True while the last mark belongs to the current item. */
@@ -188,7 +193,6 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
     const api = useApi();
     const { user, status: authStatus, updateUser } = useAuth();
     const { requirements, request: requirementsRequest } = useRequirements(ALL_COHORTS, false);
-    const timer = use(TimerControlsContext);
     const { updateSearchParams } = useNextSearchParams();
     const copyRequest = useRequest();
 
@@ -252,17 +256,6 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
     // updates do not reload the book.
     const apiRef = useRef(api);
     apiRef.current = api;
-    // A mark waits in a queue, so it reads the timer when it runs, not when the member asked.
-    const timerRef = useRef(timer);
-    timerRef.current = timer;
-    // The timer's task object stays empty until that task loads, so the user's timerTaskId
-    // decides whether the timer is free or on this task.
-    const timerTaskIdRef = useRef(user?.timerTaskId);
-    timerTaskIdRef.current = user?.timerTaskId;
-    const isTimerOnTask = useCallback(
-        (id: string) => !timerTaskIdRef.current || timerTaskIdRef.current === id,
-        [],
-    );
     // Keep a version ref for each item so a late save response updates the correct game.
     const versionRefs = useRef(new Map<string, MutableRefObject<string | undefined>>());
     const versionRef = useCallback((key: string) => {
@@ -463,17 +456,12 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
         };
     }, [current, savedKey, loadedGame?.key, versionRef]);
 
-    // Start the timer on this task when it is idle. Leave a timer on another task alone.
-    const timerStarted = useRef(false);
-    useEffect(() => {
-        if (timerStarted.current || bookState.status !== 'ready' || !task || !sessionTaskId) {
-            return;
-        }
-        timerStarted.current = true;
-        if (!timer.isRunning && isTimerOnTask(task.id)) {
-            timer.onStart(task.id);
-        }
-    }, [bookState.status, task, sessionTaskId, timer, isTimerOnTask]);
+    const {
+        session: timer,
+        peek,
+        commit,
+        reopen,
+    } = useTimerSession(sessionTaskId, bookState.status === 'ready' && !!task && !!sessionTaskId);
 
     // Track copy creation and follow-up saves for the selected canonical item.
     const machine = useRef<CopyMachine>({ phase: 'canonical', dirty: false });
@@ -590,16 +578,31 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
         [onEdit],
     );
 
-    const applySelection = useCallback((item: StudyItem) => {
-        machine.current = { phase: 'canonical', dirty: false };
-        chessRef.current = null;
-        boardUnsavedRef.current = false;
-        setCopyGame(undefined);
-        setSessionCopyKey(undefined);
-        setLoadedGame(undefined);
-        setPendingEdits(false);
-        setCurrent(item);
+    // Marks, undos and the clock starts that follow them run one after another. Marks post
+    // absolute counts, so each waits for the one requested before it, and a start waits for the
+    // stop of a Done still posting.
+    const markQueue = useRef<Promise<unknown>>(Promise.resolve());
+    const enqueue = useCallback((step: () => Promise<void>) => {
+        const run = markQueue.current.then(step, step);
+        markQueue.current = run;
+        return run;
     }, []);
+
+    const applySelection = useCallback(
+        (item: StudyItem) => {
+            machine.current = { phase: 'canonical', dirty: false };
+            chessRef.current = null;
+            boardUnsavedRef.current = false;
+            setCopyGame(undefined);
+            setSessionCopyKey(undefined);
+            setLoadedGame(undefined);
+            setPendingEdits(false);
+            setCurrent(item);
+            // Opening any game of the task is working on the task again, so a stop from Done lifts.
+            void enqueue(reopen);
+        },
+        [enqueue, reopen],
+    );
 
     const select = useCallback(
         (item: StudyItem) => {
@@ -655,20 +658,18 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
             progress: freshProgress,
             timeline: entriesRef.current,
         });
-        return { progress: freshProgress, count };
+        return { progress: freshProgress, count, user: fresh };
     }, [task, cohort, progress, updateUser]);
 
     const postMark = useCallback(
-        async (item: StudyItem) => {
+        async (item: StudyItem, stop: boolean) => {
             if (!task) throw new Error('No task to mark');
-            const { progress: fresh, count } = await freshCount();
+            const { progress: fresh, count, user: freshUser } = await freshCount();
             // The count rises by one when the item is the unit, never past the target. A book
             // counted in pages records the mark and leaves the count to the member.
             const newCount = countsItems(task, mapping) && count < totalCount ? count + 1 : count;
-            // The training plan's rule applies. The post neither counts nor clears a timer on
-            // another task.
-            const timerOnTask = isTimerOnTask(task.id);
-            const minutes = timerOnTask ? Math.floor(timerRef.current.getSeconds() / 60) : 0;
+            // The fetched record carries a pause or a task switch made on another device.
+            const minutes = peek(freshUser);
             const now = DateTime.now();
             const at = now.toUTC().toISO();
             const mark = { key: item.key, name: item.name, minutes, at };
@@ -717,34 +718,25 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
                 new_count: newCount,
                 incremental_minutes: minutes,
             });
-            if (timerOnTask) {
-                // The seconds this post did not count carry over to the next item.
-                const seconds = Math.max(0, timerRef.current.getSeconds() - minutes * 60);
-                timerRef.current.onRestart(task.id, seconds);
-            }
+            // The seconds this post did not count carry over to the next item.
+            const carried = commit(minutes, { stop });
             rememberMark({ itemKey: item.key, entryId: entry.id, counted: newCount !== count });
+            // The next mark refreshes the record, and it must read the clock after this deduction.
+            await carried;
         },
-        [task, cohort, mapping, totalCount, freshCount, isTimerOnTask, commitEntries, rememberMark],
+        [task, cohort, mapping, totalCount, freshCount, peek, commit, commitEntries, rememberMark],
     );
-
-    // Marks and undos post absolute counts, so each waits for the one requested before it.
-    const markQueue = useRef<Promise<unknown>>(Promise.resolve());
-    const enqueue = useCallback((step: () => Promise<void>) => {
-        const run = markQueue.current.then(step, step);
-        markQueue.current = run;
-        return run;
-    }, []);
 
     // One post per item. A second request while the first is queued or posting shares its result.
     const pendingMarks = useRef(new Map<string, Promise<void>>());
     const doneRef = useRef(done);
     doneRef.current = done;
     const markItemDone = useCallback(
-        (item: StudyItem) => {
+        (item: StudyItem, { stop = false }: { stop?: boolean } = {}) => {
             if (doneRef.current.has(item.key)) return Promise.resolve();
             const pending = pendingMarks.current.get(item.key);
             if (pending) return pending;
-            const mark = enqueue(() => postMark(item)).finally(() =>
+            const mark = enqueue(() => postMark(item, stop)).finally(() =>
                 pendingMarks.current.delete(item.key),
             );
             pendingMarks.current.set(item.key, mark);
@@ -782,8 +774,9 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
                 });
                 commitEntries((prev) => prev.map((e) => (e.id === edit.entry.id ? edit.entry : e)));
                 rememberMark(undefined);
+                await reopen();
             }),
-        [enqueue, task, cohort, freshCount, commitEntries, rememberMark],
+        [enqueue, task, cohort, freshCount, commitEntries, rememberMark, reopen],
     );
 
     const setMode = useCallback((item: StudyItem, kind: StudyMode['kind']) => {
@@ -896,7 +889,7 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
     if (!current) return { status: 'loading' };
 
     let session: StudySessionState | undefined;
-    if (task && sessionTaskId) {
+    if (task && sessionTaskId && timer) {
         session = {
             task,
             cohort,
@@ -905,6 +898,7 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
             mapping,
             done,
             historyComplete,
+            timer,
             markItemDone,
             undoMark,
             canUndo: lastMark?.itemKey === current.key,
