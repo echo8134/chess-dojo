@@ -2000,3 +2000,163 @@ describe('useStudy: marking an item without the dialog', () => {
         expect(study().session?.done.has(second.key)).toBe(true);
     });
 });
+
+describe('useStudy: the clock on another task', () => {
+    const otherProgress: RequirementProgress = {
+        requirementId: 'task-1',
+        counts: { ALL_COHORTS: 5 },
+        minutesSpent: { '1500-1600': 30 },
+        updatedAt: '',
+    };
+    const foreign = { kind: 'foreign' };
+    const onOther = (seconds: number) => {
+        mocks.user = {
+            ...mocks.user,
+            progress: { 'task-1': otherProgress },
+            ...toUserFields(paused('task-1', seconds)),
+        };
+    };
+
+    it('skips the switch when the clock moved elsewhere before the queued post ran', async () => {
+        onOther(1_400);
+        const release = deferred<undefined>();
+        mocks.api.updateUserProgress.mockImplementation(() =>
+            release.promise.then(() => ({
+                data: {
+                    user: mocks.user,
+                    timelineEntry: {
+                        id: 'mark',
+                        requirementId: 'polgar',
+                        previousCount: 10,
+                        newCount: 11,
+                        createdAt: NOW_ISO,
+                    },
+                },
+            })),
+        );
+        const { study } = await ready(null, POLGAR_SOURCE);
+        const item = study().current;
+        act(() => {
+            void study().session?.markItemDone(item, { stop: true });
+        });
+        await waitFor(() => expect(mocks.api.updateUserProgress).toHaveBeenCalledTimes(1));
+        let switched = false;
+        act(() => {
+            void study()
+                .session?.switchTimer()
+                .then(() => (switched = true));
+        });
+        // The navbar moves the clock to a third task while the mark is still posting.
+        mocks.user = { ...mocks.user, ...toUserFields(running('task-2', 0)) };
+        act(() => release.resolve(undefined));
+        await waitFor(() => expect(switched).toBe(true));
+        expect(mocks.api.updateUserProgress).toHaveBeenCalledTimes(1);
+        expect(setClock).not.toHaveBeenCalled();
+        expect(clockFrom(mocks.user)).toEqual(running('task-2', 0));
+    });
+
+    it('logs the minutes on the other task as time only and moves the clock here at zero', async () => {
+        onOther(1_400);
+        const created = { id: 'time-only', requirementId: 'task-1', minutesSpent: 23 };
+        mocks.api.updateUserProgress.mockResolvedValue({
+            data: { user: mocks.user, timelineEntry: created },
+        });
+        const { study } = await ready(null, POLGAR_SOURCE);
+        expect(study().session?.timer).toEqual(foreign);
+        expect(setClock).not.toHaveBeenCalled();
+
+        await act(() => study().session?.switchTimer());
+        const [posted] = mocks.api.updateUserProgress.mock.calls[0] as [UpdateUserProgressRequest];
+        expect({ ...posted, date: posted.date?.toUTC().toISO() }).toEqual({
+            cohort: '1500-1600',
+            requirementId: 'task-1',
+            previousCount: 5,
+            newCount: 5,
+            incrementalMinutesSpent: 23,
+            date: NOW_ISO,
+            notes: '',
+        });
+        expect(mocks.api.updateUserTimeline).not.toHaveBeenCalled();
+        expect(setClock.mock.calls).toEqual([[running('polgar', 0)]]);
+        expect(study().session?.timer).toEqual({ kind: 'attached', pausedBy: 'nobody' });
+        expect(mocks.trackEvent).toHaveBeenCalledWith('update_progress', {
+            requirement_id: 'task-1',
+            requirement_name: 'Study Master Games',
+            is_custom_requirement: false,
+            dojo_cohort: '1500-1600',
+            previous_count: 5,
+            new_count: 5,
+            incremental_minutes: 23,
+        });
+    });
+
+    it("grows the other task's reader entry of the day instead of creating one", async () => {
+        const otherDay = {
+            id: 'other-day',
+            owner: 'student',
+            requirementId: 'task-1',
+            cohort: '1500-1600',
+            previousCount: 4,
+            newCount: 5,
+            dojoPoints: 1,
+            totalDojoPoints: 5,
+            minutesSpent: 10,
+            totalMinutesSpent: 30,
+            date: NOW_ISO,
+            createdAt: NOW_ISO,
+            studyInfo: { items: [studied(KEY_A)] },
+        } as TimelineEntry;
+        mocks.api.listUserTimeline.mockResolvedValue({ entries: [otherDay], lastEvaluatedKey: '' });
+        onOther(1_400);
+        const { study } = await ready(null, POLGAR_SOURCE);
+
+        await act(() => study().session?.switchTimer());
+        expect(mocks.api.updateUserProgress).not.toHaveBeenCalled();
+        expect(mocks.api.updateUserTimeline).toHaveBeenCalledWith({
+            requirementId: 'task-1',
+            progress: {
+                ...otherProgress,
+                counts: { ALL_COHORTS: 5 },
+                minutesSpent: { '1500-1600': 53 },
+                updatedAt: NOW_ISO,
+            },
+            updated: [{ ...otherDay, minutesSpent: 33, totalMinutesSpent: 53 }],
+            deleted: [],
+        });
+        expect(setClock.mock.calls).toEqual([[running('polgar', 0)]]);
+    });
+
+    it('switches without a log under one minute', async () => {
+        onOther(40);
+        const { study } = await ready(null, POLGAR_SOURCE);
+        await act(() => study().session?.switchTimer());
+        expect(mocks.api.updateUserProgress).not.toHaveBeenCalled();
+        expect(mocks.api.updateUserTimeline).not.toHaveBeenCalled();
+        expect(mocks.trackEvent).not.toHaveBeenCalled();
+        expect(setClock.mock.calls).toEqual([[running('polgar', 0)]]);
+    });
+
+    it('leaves the clock on the other task when the log fails', async () => {
+        onOther(1_400);
+        mocks.api.updateUserProgress.mockRejectedValue(new Error('offline'));
+        const { study } = await ready(null, POLGAR_SOURCE);
+        await expect(act(() => study().session?.switchTimer())).rejects.toThrow('offline');
+        expect(setClock).not.toHaveBeenCalled();
+        expect(study().session?.timer).toEqual(foreign);
+    });
+
+    it('keeps the other task timed on request, until the clock leaves it', async () => {
+        onOther(40);
+        const { study, rerender } = await ready(null, POLGAR_SOURCE);
+        expect(study().session?.timerKept).toBe(false);
+        act(() => study().session?.keepTimer());
+        expect(study().session?.timerKept).toBe(true);
+        rerender();
+        expect(study().session?.timerKept).toBe(true);
+
+        mocks.user = { ...mocks.user, ...toUserFields(running('polgar', 0)) };
+        rerender();
+        expect(study().session?.timer).toEqual({ kind: 'attached', pausedBy: 'nobody' });
+        expect(study().session?.timerKept).toBe(false);
+    });
+});

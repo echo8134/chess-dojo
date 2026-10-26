@@ -2,7 +2,7 @@ import { Clock } from '@/components/timer/clock';
 import { Timer, TimerContext } from '@/components/timer/TimerContext';
 import { Requirement } from '@/database/requirement';
 import { renderWithIntl } from '@/i18n/intl.test';
-import { cleanup, fireEvent, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StudyBook, StudyItem } from './book';
 import { StudyPanel, StudyPanelProps } from './StudyPanel';
@@ -37,7 +37,21 @@ const timer = {
     onPause: vi.fn(),
 } as unknown as Timer;
 
-const session = { task: { id: 'polgar' } } as StudySessionState;
+const session = {
+    task: { id: 'polgar' },
+    timer: { kind: 'attached', pausedBy: 'nobody' },
+    timerKept: false,
+} as StudySessionState;
+/** A session whose clock is elsewhere, with the handlers the banner calls. */
+const elsewhere = (timer: StudySessionState['timer'], timerKept = false) =>
+    ({
+        ...session,
+        timer,
+        timerKept,
+        switchTimer: vi.fn().mockResolvedValue(undefined),
+        keepTimer: vi.fn(),
+        takeOverTimer: vi.fn().mockResolvedValue(undefined),
+    }) as StudySessionState;
 
 function renderPanel(overrides: Partial<StudyPanelProps> = {}, timerValue = timer) {
     const props: StudyPanelProps = {
@@ -218,24 +232,128 @@ describe('StudyPanel in read mode', () => {
 
 describe('StudyPanel timer', () => {
     const onPolgarM3: Clock = { kind: 'running', taskId: 'polgar-m3', base: 0, since: 0 };
-
-    it('names the task the timer is running on as the navbar timer does', () => {
-        const polgarM3 = {
-            id: 'polgar-m3',
-            name: 'Solve Polgar M3s through Problem {{count}}',
-            shortName: 'Polgar M3s',
-            sortPriority: '0',
-        } as Requirement;
-        renderPanel({}, { ...timer, isRunning: true, clock: onPolgarM3, task: polgarM3 });
-        expect(screen.getByText('The timer is running on Polgar M3s.')).toBeVisible();
-        expect(screen.queryByTestId('study-pause-timer')).toBeNull();
-    });
-
-    it("keeps the other task's notice before that task has loaded", () => {
-        renderPanel({}, { ...timer, isRunning: true, clock: onPolgarM3 });
-        expect(screen.getByText(/^The timer is running on/)).toBeVisible();
+    const polgarM3 = {
+        id: 'polgar-m3',
+        name: 'Solve Polgar M3s through Problem {{count}}',
+        shortName: 'Polgar M3s',
+        sortPriority: '0',
+    } as Requirement;
+    const foreign: StudySessionState['timer'] = { kind: 'foreign' };
+    const handedOff: StudySessionState['timer'] = { kind: 'handed-off' };
+    const noFooterClock = () => {
         expect(screen.queryByTestId('study-pause-timer')).toBeNull();
         expect(screen.queryByTestId('study-start-timer')).toBeNull();
+    };
+
+    it('asks whether to log the other task and time this one, naming the task as the navbar does', () => {
+        const s = elsewhere(foreign);
+        renderPanel(
+            { session: s },
+            { ...timer, isRunning: true, clock: onPolgarM3, task: polgarM3, timerSeconds: 1_395 },
+        );
+        expect(screen.getByTestId('study-timer-other')).toHaveTextContent(
+            'Timer on another taskYour timer is on Polgar M3s with 23m. This task is not being timed.',
+        );
+        expect(screen.getByTestId('study-timer-switch')).toHaveTextContent(
+            /^Log 23m and time this task$/,
+        );
+        expect(screen.getByTestId('study-timer-keep')).toHaveTextContent(
+            /^Keep timing Polgar M3s$/,
+        );
+        noFooterClock();
+        fireEvent.click(screen.getByTestId('study-timer-keep'));
+        expect(s.keepTimer).toHaveBeenCalledTimes(1);
+        fireEvent.click(screen.getByTestId('study-timer-switch'));
+        expect(s.switchTimer).toHaveBeenCalledTimes(1);
+    });
+
+    it('shows hours once the other task has them', () => {
+        renderPanel(
+            { session: elsewhere(foreign) },
+            { ...timer, isRunning: true, clock: onPolgarM3, task: polgarM3, timerSeconds: 3_900 },
+        );
+        expect(screen.getByTestId('study-timer-other')).toHaveTextContent(
+            'Your timer is on Polgar M3s with 1h 5m.',
+        );
+    });
+
+    it('calls the other task "another task" before it has loaded', () => {
+        renderPanel(
+            { session: elsewhere(foreign) },
+            { ...timer, isRunning: true, clock: onPolgarM3, timerSeconds: 120 },
+        );
+        expect(screen.getByTestId('study-timer-other')).toHaveTextContent(
+            'Your timer is on another task with 2m.',
+        );
+        expect(screen.getByTestId('study-timer-keep')).toHaveTextContent(
+            /^Keep timing another task$/,
+        );
+    });
+
+    it('offers a plain switch under one minute', () => {
+        const s = elsewhere(foreign);
+        renderPanel(
+            { session: s },
+            { ...timer, isRunning: true, clock: onPolgarM3, task: polgarM3, timerSeconds: 40 },
+        );
+        expect(screen.getByTestId('study-timer-other')).toHaveTextContent(
+            'Your timer is on Polgar M3s. This task is not being timed.',
+        );
+        expect(screen.getByTestId('study-timer-switch')).toHaveTextContent(
+            /^Time this task instead$/,
+        );
+        fireEvent.click(screen.getByTestId('study-timer-switch'));
+        expect(s.switchTimer).toHaveBeenCalledTimes(1);
+    });
+
+    it('takes one switch at a time and reports a failed one', async () => {
+        const s = elsewhere(foreign);
+        let reject!: (reason: unknown) => void;
+        vi.mocked(s.switchTimer).mockReturnValue(
+            new Promise<void>((_, rej) => {
+                reject = rej;
+            }),
+        );
+        renderPanel(
+            { session: s },
+            { ...timer, isRunning: true, clock: onPolgarM3, task: polgarM3, timerSeconds: 1_395 },
+        );
+        fireEvent.click(screen.getByTestId('study-timer-switch'));
+        expect(screen.getByTestId('study-timer-switch')).toBeDisabled();
+        fireEvent.click(screen.getByTestId('study-timer-switch'));
+        expect(s.switchTimer).toHaveBeenCalledTimes(1);
+        await act(async () => {
+            reject(new Error('offline'));
+            await Promise.resolve();
+        });
+        expect(screen.getByTestId('study-timer-switch')).toBeEnabled();
+        expect(screen.getByTestId('error-snackbar')).toHaveTextContent('offline');
+    });
+
+    it('shows nothing for the clock once the member keeps timing the other task', () => {
+        renderPanel(
+            { session: elsewhere(foreign, true) },
+            { ...timer, isRunning: true, clock: onPolgarM3, task: polgarM3, timerSeconds: 1_395 },
+        );
+        expect(screen.queryByTestId('study-timer-other')).toBeNull();
+        noFooterClock();
+        expect(screen.getByTestId('study-mark-done')).toBeInTheDocument();
+    });
+
+    it('says the timing moved to another tab and offers to take it back', () => {
+        const s = elsewhere(handedOff);
+        const onPolgar: Clock = { kind: 'running', taskId: 'polgar', base: 0, since: 0 };
+        renderPanel(
+            { session: s },
+            { ...timer, isRunning: true, clock: onPolgar, timerSeconds: 90 },
+        );
+        expect(screen.getByTestId('study-timer-moved')).toHaveTextContent(
+            'Timing moved to another tabAnother tab opened this task and has the timer now. This tab is not being timed.',
+        );
+        noFooterClock();
+        expect(screen.queryByTestId('study-timer-other')).toBeNull();
+        fireEvent.click(screen.getByTestId('study-timer-take'));
+        expect(s.takeOverTimer).toHaveBeenCalledTimes(1);
     });
 
     it('offers to pause a clock running without a task', () => {

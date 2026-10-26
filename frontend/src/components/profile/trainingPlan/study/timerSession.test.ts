@@ -1,6 +1,6 @@
 import { Clock } from '@/components/timer/clock';
 import { describe, expect, it } from 'vitest';
-import { deduct, finish, harvest, Session, sessionFor } from './timerSession';
+import { deduct, finish, foreignClock, harvest, Session, sessionFor } from './timerSession';
 
 const NOW = Date.parse('2026-10-24T18:00:00.000Z');
 const secondsAgo = (s: number) => NOW - s * 1000;
@@ -162,5 +162,31 @@ describe('finish', () => {
     it("leaves another task's clock alone", () => {
         expect(finish(running('task-b', 150, NOW), 'task-a', 2, NOW)).toBeUndefined();
         expect(finish(paused('task-b', 150), 'task-a', 2, NOW)).toBeUndefined();
+    });
+});
+
+describe('foreignClock', () => {
+    it('names the other task and its whole minutes, running or paused', () => {
+        expect(foreignClock(running('task-b', 1_380, secondsAgo(15)), 'task-a', NOW)).toEqual({
+            taskId: 'task-b',
+            minutes: 23,
+        });
+        expect(foreignClock(paused('task-b', 40), 'task-a', NOW)).toEqual({
+            taskId: 'task-b',
+            minutes: 0,
+        });
+    });
+
+    it('counts an expired clock at its last check-in', () => {
+        expect(foreignClock(running('task-b', 600, secondsAgo(700)), 'task-a', NOW)).toEqual({
+            taskId: 'task-b',
+            minutes: 10,
+        });
+    });
+
+    it('is undefined for a clock that is idle, without a task, or on the task', () => {
+        expect(foreignClock(idle, 'task-a', NOW)).toBeUndefined();
+        expect(foreignClock(running('', 600, NOW), 'task-a', NOW)).toBeUndefined();
+        expect(foreignClock(paused('task-a', 600), 'task-a', NOW)).toBeUndefined();
     });
 });

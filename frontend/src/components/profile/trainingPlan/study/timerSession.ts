@@ -2,12 +2,15 @@ import { Clock, elapsedSeconds, pause } from '@/components/timer/clock';
 
 /**
  * The reader's relation to the work timer. A clock on another task is foreign and the reader
- * leaves it alone. An attached clock is idle, without a task, or on the reader's task, and
- * whoever paused it last decides who resumes it. A stop from Done lifts when another game of
- * the task opens.
+ * leaves it alone. A session another tab took is handed off, and this tab leaves the clock to
+ * that tab. An attached clock is idle, without a task, or on the reader's task, and whoever
+ * paused it last decides who resumes it. A stop from Done lifts when another game of the task
+ * opens.
  */
 export type Session =
-    { kind: 'foreign' } | { kind: 'attached'; pausedBy: 'nobody' | 'member' | 'reader' | 'done' };
+    | { kind: 'foreign' }
+    | { kind: 'handed-off' }
+    | { kind: 'attached'; pausedBy: 'nobody' | 'member' | 'reader' | 'done' };
 
 /** A hidden tab keeps the clock running this long before the reader pauses it. */
 export const HIDDEN_GRACE_MS = 60_000;
@@ -91,6 +94,21 @@ export function finish(
     const stopped = pause(deducted(clock, minutes, now), now, taskId);
     // A clock paused without a task stops on the reader's task, as a running one does.
     return stopped.kind === 'paused' ? { ...stopped, taskId: stopped.taskId || taskId } : undefined;
+}
+
+/**
+ * The task a foreign clock is on and the whole minutes it holds, for the banner and the switch.
+ * Undefined when the clock is attached.
+ */
+export function foreignClock(
+    clock: Clock,
+    taskId: string,
+    now: number,
+): { taskId: string; minutes: number } | undefined {
+    if (clock.kind === 'idle' || onTask(clock, taskId)) {
+        return undefined;
+    }
+    return { taskId: clock.taskId, minutes: Math.floor(elapsedSeconds(clock, now) / 60) };
 }
 
 /**

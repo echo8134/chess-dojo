@@ -1,9 +1,13 @@
+import { RequestSnackbar, useRequest } from '@/api/Request';
 import { formatTime } from '@/board/pgn/boardTools/underboard/clock/ClockUsage';
 import { UnderboardPgnText } from '@/board/pgn/pgnText/PgnText';
 import { getTaskName } from '@/components/timer/TimerButton';
 import { TimerContext } from '@/components/timer/TimerContext';
+import { formatTime as formatMinutes } from '@/database/requirement';
 import { Check, ChevronLeft, ChevronRight, Pause, PlayArrow, Undo } from '@mui/icons-material';
 import {
+    Alert,
+    AlertTitle,
     Button,
     IconButton,
     Stack,
@@ -49,7 +53,7 @@ export interface StudyPanelProps {
 /**
  * The board's right panel: the item's name, the move list or the solve card, the timer, and
  * Prev / Done / Next. Once the item is marked, Undo takes Done's slot and Next becomes the
- * primary action.
+ * primary action. A banner above the footer asks for a decision while the clock is elsewhere.
  */
 export function StudyPanel({
     book,
@@ -101,9 +105,16 @@ export function StudyPanel({
                     <UnderboardPgnText />
                 )}
             </Stack>
+            {session && <TimerBanner session={session} />}
             <Stack sx={{ flexShrink: 0, borderTop: 1, borderColor: 'divider', p: 1.5, gap: 1 }}>
                 <Stack direction='row' sx={{ alignItems: 'center', gap: 1 }}>
-                    {session ? <TimerButton taskId={session.task.id} /> : <StudyBrowseNotice />}
+                    {session ? (
+                        session.timer.kind === 'attached' && (
+                            <TimerButton taskId={session.task.id} />
+                        )
+                    ) : (
+                        <StudyBrowseNotice />
+                    )}
                     <ToggleButtonGroup
                         size='small'
                         exclusive
@@ -182,23 +193,106 @@ export function StudyPanel({
 }
 
 /**
+ * The decision the panel asks for while the clock is elsewhere. While the clock is on another
+ * task, it offers to log that task's minutes and time this one, or to keep timing that one.
+ * While another tab has the session, it offers to take it back. Nothing while the session is
+ * attached, or once the member chose to keep.
+ */
+function TimerBanner({ session }: { session: StudySessionState }) {
+    const t = useTranslations('study.session');
+    const tCommon = useTranslations('common');
+    const timer = use(TimerContext);
+    const request = useRequest();
+
+    if (session.timer.kind === 'handed-off') {
+        return (
+            <Alert
+                severity='warning'
+                variant='outlined'
+                data-testid='study-timer-moved'
+                sx={BANNER_SX}
+            >
+                <AlertTitle>{t('timerMovedTitle')}</AlertTitle>
+                {t('timerMoved')}
+                <Stack direction='row' sx={ACTIONS_SX}>
+                    <Button
+                        size='small'
+                        variant='outlined'
+                        color='inherit'
+                        onClick={() => void session.takeOverTimer()}
+                        data-testid='study-timer-take'
+                    >
+                        {t('timerTakeOver')}
+                    </Button>
+                </Stack>
+            </Alert>
+        );
+    }
+    if (session.timer.kind !== 'foreign' || session.timerKept) {
+        return null;
+    }
+    const minutes = Math.floor(timer.timerSeconds / 60);
+    const time = formatMinutes(minutes, tCommon);
+    // The provider's task follows the clock's task id, a render or a fetch behind it.
+    const held = timer.clock.kind === 'idle' ? '' : timer.clock.taskId;
+    const name = timer.task?.id === held ? getTaskName(timer.task) : t('timerOtherUnknown');
+    const onSwitch = () => {
+        if (request.isLoading()) return;
+        request.onStart();
+        session.switchTimer().then(() => request.onSuccess(), request.onFailure);
+    };
+    return (
+        <>
+            <Alert
+                severity='warning'
+                variant='outlined'
+                data-testid='study-timer-other'
+                sx={BANNER_SX}
+            >
+                <AlertTitle>{t('timerOtherTitle')}</AlertTitle>
+                {minutes > 0
+                    ? t('timerOther', { time, name })
+                    : t('timerOtherUnderMinute', { name })}
+                <Stack direction='row' sx={ACTIONS_SX}>
+                    <Button
+                        size='small'
+                        variant='outlined'
+                        color='inherit'
+                        onClick={onSwitch}
+                        disabled={request.isLoading()}
+                        data-testid='study-timer-switch'
+                    >
+                        {minutes > 0 ? t('timerSwitchLog', { time }) : t('timerSwitch')}
+                    </Button>
+                    <Button
+                        size='small'
+                        color='inherit'
+                        onClick={session.keepTimer}
+                        disabled={request.isLoading()}
+                        data-testid='study-timer-keep'
+                    >
+                        {t('timerKeep', { name })}
+                    </Button>
+                </Stack>
+            </Alert>
+            <RequestSnackbar request={request} />
+        </>
+    );
+}
+
+const BANNER_SX = { mx: 1.5, mb: 1.5, flexShrink: 0 };
+// The buttons sit on their own row, apart from the sentence, and wrap on a narrow panel.
+const ACTIONS_SX = { gap: 1, mt: 1.5, flexWrap: 'wrap' as const };
+
+/**
  * Start, pause or resume the task's timer. Shows the time once the timer has run, and the
  * label before. The aria-label names the action.
  */
 function TimerButton({ taskId }: { taskId: string }) {
     const t = useTranslations('study.session');
     const timer = use(TimerContext);
-    const otherTask =
-        timer.clock.kind !== 'idle' && !!timer.clock.taskId && timer.clock.taskId !== taskId;
     const time = formatTime(timer.timerSeconds);
 
-    if (otherTask) {
-        return (
-            <Typography variant='body2' sx={{ color: 'text.secondary' }}>
-                {t('timerOtherTask', { name: timer.task ? getTaskName(timer.task) : '' })}
-            </Typography>
-        );
-    }
     if (timer.isRunning) {
         return (
             <Button

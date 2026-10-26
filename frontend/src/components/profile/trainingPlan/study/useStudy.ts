@@ -85,6 +85,8 @@ export interface StudySessionState {
     historyComplete: boolean;
     /** The reader's hold on the work timer. */
     timer: Session;
+    /** The member chose to leave the clock on the other task. Holds while the clock stays away. */
+    timerKept: boolean;
     /**
      * Posts the item as done with the timer's minutes. The count rises by one when the item is
      * the unit and stays where it is otherwise. The day's first mark creates the entry and later
@@ -101,6 +103,16 @@ export interface StudySessionState {
     undoMark: (itemKey: string) => Promise<void>;
     /** True while the last mark belongs to the current item. */
     canUndo: boolean;
+    /**
+     * Logs the whole minutes a clock on another task holds on that task, as time only, growing
+     * the day's reader entry when there is one, then moves the clock here at zero. Under one
+     * minute nothing is logged. Runs through the mark queue.
+     */
+    switchTimer: () => Promise<void>;
+    /** Leaves the clock on the other task and dismisses the decision for this visit. */
+    keepTimer: () => void;
+    /** Takes the session back from the tab that took it. */
+    takeOverTimer: () => Promise<void>;
 }
 
 export interface StudyReady {
@@ -461,7 +473,21 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
         peek,
         commit,
         reopen,
+        foreign,
+        switchHere,
+        takeOver,
     } = useTimerSession(sessionTaskId, bookState.status === 'ready' && !!task && !!sessionTaskId);
+    const [timerKept, setTimerKept] = useState(false);
+    const keepTimer = useCallback(() => setTimerKept(true), []);
+    // The decision lasts for this task while the clock is away. Once the clock is back here or
+    // idle, or the reader moves to another task, a clock on another task is a new decision.
+    const timerAttached = timer?.kind === 'attached';
+    useEffect(() => {
+        if (timerAttached) setTimerKept(false);
+    }, [timerAttached]);
+    useEffect(() => {
+        setTimerKept(false);
+    }, [sessionTaskId]);
 
     // Track copy creation and follow-up saves for the selected canonical item.
     const machine = useRef<CopyMachine>({ phase: 'canonical', dirty: false });
@@ -779,6 +805,76 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
         [enqueue, task, cohort, freshCount, commitEntries, rememberMark, reopen],
     );
 
+    // The other task's minutes go on that task as a record without a mark, and its count stays
+    // where it is. The clock moves here only once that post has landed.
+    const switchTimer = useCallback(() => {
+        // The member agreed to move the clock from the task the banner named. A mark ahead in
+        // the queue may add a minute before the post runs, and that minute is logged too.
+        const agreed = foreign();
+        if (!agreed) return Promise.resolve();
+        return enqueue(async () => {
+            const other = foreign();
+            if (other?.taskId !== agreed.taskId) return;
+            if (other.minutes > 0) {
+                const otherTask =
+                    user?.customTasks?.find((t) => t.id === other.taskId) ??
+                    requirements.find((r) => r.id === other.taskId);
+                if (!user || !otherTask) throw new Error('Task not found');
+                const otherCohort = taskCohort(otherTask, user);
+                const otherProgress = user.progress[otherTask.id];
+                const now = DateTime.now();
+                const count = getCurrentCount({
+                    cohort: otherCohort,
+                    requirement: otherTask,
+                    progress: otherProgress,
+                    timeline: entriesRef.current,
+                });
+                const today = dayEntry(entriesRef.current, otherTask.id, now);
+                if (today) {
+                    const edit = editDayEntry(today, {
+                        items: today.studyInfo.items,
+                        newCount: count,
+                        minutes: other.minutes,
+                        task: otherTask,
+                        cohort: otherCohort,
+                        progress: otherProgress,
+                        at: now.toUTC().toISO(),
+                    });
+                    await apiRef.current.updateUserTimeline({
+                        requirementId: otherTask.id,
+                        progress: edit.progress,
+                        updated: [edit.entry],
+                        deleted: [],
+                    });
+                    commitEntries((prev) =>
+                        prev.map((e) => (e.id === edit.entry.id ? edit.entry : e)),
+                    );
+                } else {
+                    const resp = await apiRef.current.updateUserProgress({
+                        cohort: otherCohort,
+                        requirementId: otherTask.id,
+                        previousCount: count,
+                        newCount: count,
+                        incrementalMinutesSpent: other.minutes,
+                        date: now,
+                        notes: '',
+                    });
+                    commitEntries((prev) => [resp.data.timelineEntry, ...prev]);
+                }
+                trackEvent(AnalyticsEvent.UpdateProgress, {
+                    requirement_id: otherTask.id,
+                    requirement_name: otherTask.name,
+                    is_custom_requirement: !isRequirement(otherTask),
+                    dojo_cohort: otherCohort,
+                    previous_count: count,
+                    new_count: count,
+                    incremental_minutes: other.minutes,
+                });
+            }
+            await switchHere(agreed.taskId);
+        });
+    }, [enqueue, foreign, switchHere, user, requirements, commitEntries]);
+
     const setMode = useCallback((item: StudyItem, kind: StudyMode['kind']) => {
         if (pendingEditsRef.current || boardUnsavedRef.current) {
             return false;
@@ -899,9 +995,13 @@ export function useStudy(source: StudySource, urlItemKey: string | null): StudyS
             done,
             historyComplete,
             timer,
+            timerKept,
             markItemDone,
             undoMark,
             canUndo: lastMark?.itemKey === current.key,
+            switchTimer,
+            keepTimer,
+            takeOverTimer: takeOver,
         };
     }
     return {

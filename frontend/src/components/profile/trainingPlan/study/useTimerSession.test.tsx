@@ -123,7 +123,10 @@ function mount(initial: Clock, props: Props = ON_TASK_A, { strict = false } = {}
 }
 
 beforeEach(() => {
-    vi.useFakeTimers();
+    // The channel delivers on the event loop, so setImmediate stays real to let it.
+    vi.useFakeTimers({
+        toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+    });
     vi.setSystemTime(NOW);
     visibility = 'visible';
     Object.defineProperty(document, 'visibilityState', {
@@ -593,5 +596,205 @@ describe('useTimerSession when Done stops the clock', () => {
         unmount();
         advance(0);
         expect(setClock.mock.calls).toEqual([[paused('task-a', 59)]]);
+    });
+});
+
+describe('useTimerSession across tabs', () => {
+    const CHANNEL = 'dojo-reader-timer';
+    const nobody = { kind: 'attached', pausedBy: 'nobody' };
+    const handedOff = { kind: 'handed-off' };
+    let otherTab: BroadcastChannel;
+    let heard: { taskId: string; tabId: string; at: number }[];
+    /** Lets the channel deliver what was posted so far. */
+    const deliver = () => act(() => new Promise<void>((resolve) => setImmediate(resolve)));
+    /** The other tab announces the task, a moment after this tab did unless told otherwise. */
+    const opensElsewhere = async (taskId: string, at = Date.now() + 1, tabId = 'other-tab') => {
+        otherTab.postMessage({ taskId, tabId, at });
+        await deliver();
+    };
+
+    beforeEach(() => {
+        heard = [];
+        otherTab = new BroadcastChannel(CHANNEL);
+        otherTab.onmessage = (e: MessageEvent<{ taskId: string; tabId: string; at: number }>) =>
+            heard.push(e.data);
+    });
+
+    afterEach(() => {
+        otherTab.close();
+    });
+
+    it('tells the other tabs when it opens, with an id that is not theirs', async () => {
+        mount(running('task-a', 10, secondsAgo(30)));
+        await deliver();
+        expect(heard.map((m) => m.taskId)).toEqual(['task-a']);
+        expect(heard[0].tabId).toMatch(/^[a-z0-9]+$/);
+        expect(heard[0].tabId).not.toBe('other-tab');
+    });
+
+    it('hands the session off when another tab opens the task, and leaves the clock alone from then on', async () => {
+        const { result, setClock, unmount } = mount(running('task-a', 10, secondsAgo(30)));
+        await deliver();
+        expect(result.current.session).toEqual(nobody);
+        await opensElsewhere('task-a');
+        expect(result.current.session).toEqual(handedOff);
+        await show('hidden');
+        advance(120_000);
+        await show('visible');
+        pageHide();
+        unmount();
+        advance(0);
+        expect(setClock).not.toHaveBeenCalled();
+    });
+
+    it('stays the owner when the other tab announced before it did', async () => {
+        const { result } = mount(running('task-a', 10, secondsAgo(30)));
+        await deliver();
+        await opensElsewhere('task-a', Date.now() - 1);
+        expect(result.current.session).toEqual(nobody);
+    });
+
+    it('settles two announces made at the same time on the tab id', async () => {
+        const { result } = mount(running('task-a', 10, secondsAgo(30)));
+        await deliver();
+        const own = heard[0];
+        await opensElsewhere('task-a', own.at, '!' + own.tabId);
+        expect(result.current.session).toEqual(nobody);
+        await opensElsewhere('task-a', own.at, '~' + own.tabId);
+        expect(result.current.session).toEqual(handedOff);
+    });
+
+    it('ignores a tab that opens another task', async () => {
+        const { result } = mount(running('task-a', 10, secondsAgo(30)));
+        await opensElsewhere('task-b');
+        expect(result.current.session).toEqual(nobody);
+    });
+
+    it('is handed off while Done has the clock stopped, and a reopen then writes nothing', async () => {
+        const { result, setClock } = mount(running('task-a', 479, NOW));
+        await act(() => result.current.commit(7, { stop: true }));
+        await opensElsewhere('task-a');
+        expect(result.current.session).toEqual(handedOff);
+        await act(() => result.current.reopen());
+        expect(setClock.mock.calls).toEqual([[paused('task-a', 59)]]);
+    });
+
+    it('still stops the clock for a Done in a handed-off tab, and stays handed off', async () => {
+        const { result, setClock } = mount(running('task-a', 479, NOW));
+        await opensElsewhere('task-a');
+        await act(() => result.current.commit(7, { stop: true }));
+        expect(setClock.mock.calls).toEqual([[paused('task-a', 59)]]);
+        expect(result.current.session).toEqual(handedOff);
+    });
+
+    it('takes a running clock back without a write and tells the other tab', async () => {
+        const { result, setClock } = mount(running('task-a', 10, secondsAgo(30)));
+        await opensElsewhere('task-a');
+        await act(() => result.current.takeOver());
+        expect(result.current.session).toEqual(nobody);
+        expect(setClock).not.toHaveBeenCalled();
+        await deliver();
+        expect(heard).toHaveLength(2);
+        expect(heard[1]).toEqual({ taskId: 'task-a', tabId: heard[0].tabId, at: NOW + 2 });
+    });
+
+    it('reads the record before taking back a clock the other tab paused, and starts it from its seconds', async () => {
+        const { result, setClock, server } = mount(running('task-a', 10, secondsAgo(30)));
+        await opensElsewhere('task-a');
+        server(paused('task-a', 100));
+        advance(5_000);
+        await act(() => result.current.takeOver());
+        expect(setClock.mock.calls).toEqual([[running('task-a', 100, NOW + 5_000)]]);
+        expect(result.current.session).toEqual(nobody);
+    });
+
+    it('takes the session back from its own copy when the record cannot be read', async () => {
+        const { result, setClock, reconcile } = mount(running('task-a', 10, secondsAgo(30)));
+        await opensElsewhere('task-a');
+        reconcile.mockResolvedValueOnce(undefined);
+        await act(() => result.current.takeOver());
+        expect(result.current.session).toEqual(nobody);
+        expect(setClock).not.toHaveBeenCalled();
+    });
+
+    it('is handed off again when the other tab takes the session back', async () => {
+        const { result } = mount(running('task-a', 10, secondsAgo(30)));
+        await opensElsewhere('task-a');
+        await act(() => result.current.takeOver());
+        await opensElsewhere('task-a', NOW + 10);
+        expect(result.current.session).toEqual(handedOff);
+    });
+
+    it('moves a clock on another task here at zero and tells the other tabs', async () => {
+        const { result, setClock } = mount(paused('task-b', 1_400));
+        await deliver();
+        expect(result.current.foreign()).toEqual({ taskId: 'task-b', minutes: 23 });
+        await act(() => result.current.switchHere('task-b'));
+        expect(setClock.mock.calls).toEqual([[running('task-a', 0, NOW)]]);
+        expect(result.current.session).toEqual(nobody);
+        expect(result.current.foreign()).toBeUndefined();
+        await deliver();
+        expect(heard).toHaveLength(2);
+        expect(heard[1]).toEqual({ taskId: 'task-a', tabId: heard[0].tabId, at: NOW + 1 });
+    });
+
+    it('writes nothing for a switch when the clock is already on the task', async () => {
+        const { result, setClock } = mount(running('task-a', 10, secondsAgo(30)));
+        await act(() => result.current.switchHere('task-b'));
+        expect(setClock).not.toHaveBeenCalled();
+    });
+
+    it('forgets a hand-off when the reader moves to another task and back', async () => {
+        const { result, rerender } = mount(running('task-a', 10, secondsAgo(30)));
+        await deliver();
+        await opensElsewhere('task-a');
+        expect(result.current.session).toEqual(handedOff);
+        rerender({ taskId: 'task-b', enabled: true });
+        rerender({ taskId: 'task-a', enabled: true });
+        await deliver();
+        expect(result.current.session).toEqual(nobody);
+        expect(heard.map((m) => m.taskId)).toEqual(['task-a', 'task-b', 'task-a']);
+    });
+
+    it('announces a take-over after the newest claim it heard, not at the same time', async () => {
+        const { result } = mount(running('task-a', 10, secondsAgo(30)));
+        await deliver();
+        await opensElsewhere('task-a', NOW + 5000);
+        expect(result.current.session).toEqual(handedOff);
+        await act(() => result.current.takeOver());
+        await deliver();
+        expect(heard.at(-1)?.at).toBe(NOW + 5001);
+        expect(result.current.session).toEqual(nobody);
+    });
+
+    it('writes nothing for a switch queued for a task the reader has left', async () => {
+        const { result, setClock, rerender } = mount(running('task-b', 1380, NOW));
+        const queued = result.current.switchHere;
+        rerender({ taskId: 'task-c', enabled: true });
+        await act(() => queued('task-b'));
+        expect(setClock).not.toHaveBeenCalled();
+    });
+
+    it('writes nothing for a switch or a reopen once the page hid', async () => {
+        const { result, setClock } = mount(running('task-b', 1380, NOW));
+        pageHide();
+        await act(() => result.current.switchHere('task-b'));
+        await act(() => result.current.reopen());
+        expect(setClock).not.toHaveBeenCalled();
+    });
+
+    it('writes nothing for a switch when the clock moved to a third task meanwhile', async () => {
+        const { result, setClock, member } = mount(running('task-b', 1380, NOW));
+        member(running('task-c', 0, NOW));
+        await act(() => result.current.switchHere('task-b'));
+        expect(setClock).not.toHaveBeenCalled();
+        expect(result.current.session).toEqual({ kind: 'foreign' });
+    });
+
+    it('writes nothing for a switch that runs once the reader is gone', async () => {
+        const { result, setClock, unmount } = mount(paused('task-b', 1_400));
+        unmount();
+        await act(() => result.current.switchHere('task-b'));
+        expect(setClock).not.toHaveBeenCalled();
     });
 });
