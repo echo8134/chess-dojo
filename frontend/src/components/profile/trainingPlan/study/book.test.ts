@@ -253,6 +253,35 @@ describe('neighbours', () => {
         expect(neighbours(single, item('s1'))).toEqual({ prev: undefined, next: undefined });
         expect(neighbours(book, item('zz'))).toEqual({});
     });
+
+    it('moves next past a run of items already done, and keeps prev as the plain neighbour', () => {
+        const four = {
+            ...book,
+            chapters: [
+                { name: 'A', items: [item('a1'), item('a2')] },
+                { name: 'B', items: [item('b1'), item('b2')] },
+            ],
+        };
+        expect(neighbours(four, item('a1'), new Set(['a2', 'b1']))).toEqual({
+            prev: undefined,
+            next: item('b2'),
+        });
+        expect(neighbours(four, item('a2'), new Set(['a1', 'b1']))).toEqual({
+            prev: item('a1'),
+            next: item('b2'),
+        });
+    });
+
+    it('falls back to the plain next item once every later item is done', () => {
+        expect(neighbours(book, item('a1'), new Set(['a2', 'b1']))).toEqual({
+            prev: undefined,
+            next: item('a2'),
+        });
+        expect(neighbours(book, item('b1'), new Set(['a1', 'a2']))).toEqual({
+            prev: item('a2'),
+            next: undefined,
+        });
+    });
 });
 
 describe('chapterOf', () => {

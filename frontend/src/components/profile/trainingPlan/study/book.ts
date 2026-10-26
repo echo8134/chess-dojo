@@ -145,15 +145,23 @@ export function chapterOf(book: StudyBook, item: StudyItem): StudyChapter | unde
     return book.chapters.find((chapter) => chapter.items.some((i) => i.key === item.key));
 }
 
-/** The items before and after the current one in reading order, across chapters. */
+/**
+ * The items before and after the current one in reading order, across chapters. With the done
+ * set, next is the first later item not yet done, so Next after a look back at an old puzzle
+ * lands on the next one to solve. Once every later item is done, next is the plain neighbour.
+ * Prev is always the plain neighbour.
+ */
 export function neighbours(
     book: StudyBook,
     current: StudyItem,
+    done?: ReadonlySet<string>,
 ): { prev?: StudyItem; next?: StudyItem } {
     const items = itemsOf(book);
     const index = items.findIndex((item) => item.key === current.key);
     if (index < 0) {
         return {};
     }
-    return { prev: items[index - 1], next: items[index + 1] };
+    const later = items.slice(index + 1);
+    const next = (done && later.find((item) => !done.has(item.key))) ?? later[0];
+    return { prev: items[index - 1], next };
 }

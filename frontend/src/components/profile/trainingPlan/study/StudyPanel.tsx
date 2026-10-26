@@ -69,7 +69,7 @@ export function StudyPanel({
 }: StudyPanelProps) {
     const t = useTranslations('study');
     const chapter = chapterOf(book, current);
-    const { prev, next } = neighbours(book, current);
+    const { prev, next } = neighbours(book, current, session?.done);
     const mode: StudyMode['kind'] = solveStatus ? 'solve' : 'read';
     const onNext = next ? () => onSelect(next) : undefined;
     const undo = mark?.canUndo ? mark : undefined;

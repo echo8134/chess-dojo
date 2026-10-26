@@ -81,6 +81,39 @@ function renderPanel(overrides: Partial<StudyPanelProps> = {}, timerValue = time
 
 afterEach(cleanup);
 
+describe('StudyPanel and the Next arrow', () => {
+    const third = item('k3', 'Problem 9');
+    const longer: StudyBook = {
+        ...book,
+        chapters: [{ name: 'Problems', items: [first, second, third] }],
+    };
+
+    it('sends Next past an item already done, and to the plain neighbour when none is done', () => {
+        const { props } = renderPanel({
+            book: longer,
+            session: { ...session, done: new Set(['k2']) },
+        });
+        fireEvent.click(screen.getByTestId('study-next'));
+        expect(props.onSelect).toHaveBeenCalledWith(third);
+
+        const plain = renderPanel({ book: longer, session: { ...session, done: new Set() } });
+        fireEvent.click(screen.getAllByTestId('study-next')[1]);
+        expect(plain.props.onSelect).toHaveBeenCalledWith(second);
+    });
+
+    it('sends the primary Next after a mark past an item already done as well', () => {
+        const { props } = renderPanel({
+            book: longer,
+            solveStatus: undefined,
+            isDone: true,
+            mark: { canUndo: true, saving: false, onUndo: vi.fn() },
+            session: { ...session, done: new Set(['k1', 'k2']) },
+        });
+        fireEvent.click(screen.getByTestId('study-mark-next'));
+        expect(props.onSelect).toHaveBeenCalledWith(third);
+    });
+});
+
 describe('StudyPanel in solve mode', () => {
     it('shows the side to move and Show solution instead of the move list, with Done off', () => {
         const { props } = renderPanel();
